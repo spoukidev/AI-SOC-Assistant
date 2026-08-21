@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -31,6 +31,33 @@ class NetworkEvent(Base):
     source: Mapped[str] = mapped_column(String(64), default="SYNTHETIC DEMO DATA")
     raw_event: Mapped[dict] = mapped_column(JSON)
     alert: Mapped["Alert | None"] = relationship(back_populates="event")
+    feature_vector: Mapped["FeatureVector | None"] = relationship(back_populates="event")
+
+
+class ImportBatch(Base):
+    __tablename__ = "import_batches"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    source_type: Mapped[str] = mapped_column(String(32), default="CSV")
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    total_rows: Mapped[int] = mapped_column(Integer)
+    accepted_rows: Mapped[int] = mapped_column(Integer)
+    rejected_rows: Mapped[int] = mapped_column(Integer)
+    column_mapping: Mapped[dict] = mapped_column(JSON)
+    errors: Mapped[list] = mapped_column(JSON, default=list)
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    feature_vectors: Mapped[list["FeatureVector"]] = relationship(back_populates="import_batch")
+
+
+class FeatureVector(Base):
+    __tablename__ = "feature_vectors"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("network_events.id"), unique=True, index=True)
+    import_id: Mapped[int] = mapped_column(ForeignKey("import_batches.id"), index=True)
+    schema_version: Mapped[str] = mapped_column(String(32), default="flow-v1")
+    features: Mapped[dict] = mapped_column(JSON)
+    event: Mapped[NetworkEvent] = relationship(back_populates="feature_vector")
+    import_batch: Mapped[ImportBatch] = relationship(back_populates="feature_vectors")
 
 
 class Alert(Base):
