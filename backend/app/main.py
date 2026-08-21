@@ -1,14 +1,17 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from datetime import datetime, timezone
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
-from .models import Alert, Incident, NetworkEvent, Severity
+from .models import Alert, FeatureVector, ImportBatch, Incident, NetworkEvent, Severity
 from .seed import seed_demo_data
+from .services.csv_ingestion import read_csv_upload
 
 
 @asynccontextmanager
@@ -20,21 +23,22 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                    allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type", "Authorization"])
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "healthy", "service": "backend", "milestone": 1}
+    return {"status": "healthy", "service": "backend", "milestone": 2}
 
 
 def serialize_event(event: NetworkEvent) -> dict:
     return {"id": event.id, "timestamp": event.timestamp, "src_ip": event.src_ip, "dst_ip": event.dst_ip,
             "src_port": event.src_port, "dst_port": event.dst_port, "protocol": event.protocol,
             "duration": event.duration, "packets": event.packets, "bytes": event.bytes,
-            "tcp_flags": event.tcp_flags, "source": event.source, "raw_event": event.raw_event}
+            "tcp_flags": event.tcp_flags, "source": event.source, "raw_event": event.raw_event,
+            "features": event.feature_vector.features if event.feature_vector else None}
 
 
 def serialize_alert(alert: Alert) -> dict:
@@ -69,16 +73,93 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
 
 
 @app.get("/api/events")
-def events(db: Session = Depends(get_db)) -> list[dict]:
-    return [serialize_event(e) for e in db.scalars(select(NetworkEvent).order_by(NetworkEvent.timestamp.desc())).all()]
+def events(
+    protocol: str | None = None,
+    source: str | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = select(NetworkEvent).options(joinedload(NetworkEvent.feature_vector)).order_by(NetworkEvent.timestamp.desc())
+    if protocol:
+        statement = statement.where(NetworkEvent.protocol == protocol.upper())
+    if source:
+        statement = statement.where(NetworkEvent.source == source)
+    return [serialize_event(e) for e in db.scalars(statement.offset(offset).limit(limit)).all()]
 
 
 @app.get("/api/events/{event_id}")
 def event(event_id: int, db: Session = Depends(get_db)) -> dict:
-    item = db.get(NetworkEvent, event_id)
+    item = db.scalar(select(NetworkEvent).where(NetworkEvent.id == event_id).options(joinedload(NetworkEvent.feature_vector)))
     if not item:
         raise HTTPException(404, "Event not found")
     return serialize_event(item)
+
+
+@app.post("/api/events/import", status_code=201)
+async def import_events(
+    file: UploadFile = File(...),
+    column_mapping: str | None = Form(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    parsed = await read_csv_upload(file, column_mapping)
+    batch = ImportBatch(
+        filename=parsed.filename,
+        source_type="CSV",
+        imported_at=datetime.now(timezone.utc),
+        total_rows=parsed.total_rows,
+        accepted_rows=len(parsed.events),
+        rejected_rows=parsed.total_rows - len(parsed.events),
+        column_mapping=parsed.mapping,
+        errors=parsed.errors,
+        synthetic=False,
+    )
+    db.add(batch)
+    db.flush()
+    for row in parsed.events:
+        features = row.pop("features")
+        event = NetworkEvent(
+            timestamp=row["timestamp"], src_ip=row["src_ip"], dst_ip=row["dst_ip"],
+            src_port=row["src_port"], dst_port=row["dst_port"], protocol=row["protocol"],
+            duration=row["duration"], packets=row["packets"], bytes=row["bytes"],
+            tcp_flags=row["tcp_flags"], source=f"CSV_IMPORT:{parsed.filename}", raw_event=row["raw_event"],
+        )
+        db.add(event)
+        db.flush()
+        db.add(FeatureVector(event_id=event.id, import_id=batch.id, schema_version="flow-v1", features=features))
+    db.commit()
+    return serialize_import(batch)
+
+
+def serialize_import(batch: ImportBatch) -> dict:
+    return {
+        "id": batch.id, "filename": batch.filename, "source_type": batch.source_type,
+        "imported_at": batch.imported_at, "total_rows": batch.total_rows,
+        "accepted_rows": batch.accepted_rows, "rejected_rows": batch.rejected_rows,
+        "column_mapping": batch.column_mapping, "errors": batch.errors, "synthetic": batch.synthetic,
+    }
+
+
+@app.get("/api/imports")
+def imports(db: Session = Depends(get_db)) -> list[dict]:
+    batches = db.scalars(select(ImportBatch).order_by(ImportBatch.imported_at.desc()).limit(50)).all()
+    return [serialize_import(batch) for batch in batches]
+
+
+@app.get("/api/research/dataset")
+def dataset_profile(db: Session = Depends(get_db)) -> dict:
+    event_count = db.scalar(select(func.count(NetworkEvent.id))) or 0
+    imported_count = db.scalar(select(func.count(FeatureVector.id))) or 0
+    protocols = db.execute(select(NetworkEvent.protocol, func.count(NetworkEvent.id)).group_by(NetworkEvent.protocol)).all()
+    sources = db.execute(select(NetworkEvent.source, func.count(NetworkEvent.id)).group_by(NetworkEvent.source)).all()
+    return {
+        "name": "Current event store", "samples": event_count, "engineered_samples": imported_count,
+        "feature_schema": "flow-v1", "feature_count": 12,
+        "protocol_distribution": [{"name": name, "count": count} for name, count in protocols],
+        "sources": [{"name": name, "count": count} for name, count in sources],
+        "labels_available": False,
+        "limitations": "Imported events are unlabeled. No train/test split or model metrics are available until a labeled experiment is run.",
+    }
 
 
 @app.get("/api/alerts")
