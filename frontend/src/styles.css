@@ -209,11 +209,52 @@ footer b { color: #748399; }
 .planned-honesty small { margin-top: 3px; color: #94865a; font-size: 9px; line-height: 1.5; }
 .planned-page > button { padding: 9px 14px; color: #bfdbfe; background: #14243a; border: 1px solid #2c4767; border-radius: 8px; font-size: 10px; cursor: pointer; }
 .planned-page > button:hover { background: #19304d; }
+.experiment-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr); gap: 12px; margin-bottom: 12px; }
+.training-panel .panel-head > svg { color: #a78bfa; }
+.field-label { display: grid; gap: 6px; margin-bottom: 10px; color: #718096; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
+.field-label select { width: 100%; height: 38px; padding: 0 10px; color: #cbd7e7; background: #0a121e; border: 1px solid #26364a; border-radius: 8px; outline: none; }
+.field-label select:focus { border-color: #3b82f6; }
+.dropzone.compact { min-height: 103px; }
+.research-guardrail { align-self: stretch; }
+.guardrail-row { display: flex; align-items: center; gap: 9px; padding: 11px 2px; color: #8492a6; border-bottom: 1px solid #182334; font-size: 10px; }
+.guardrail-row svg { flex: 0 0 auto; color: #22c55e; }
+.experiment-history { padding: 0; overflow: hidden; }
+.experiment-history > .panel-head { padding: 16px 18px 0; }
+.experiment-cards { display: grid; }
+.experiment-cards > article { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(280px, 1fr) auto; align-items: center; gap: 20px; padding: 14px 18px; border-top: 1px solid #192536; }
+.experiment-cards > article > div:first-child > span { color: #4f8ed8; font-size: 8px; font-weight: 700; letter-spacing: 1px; }
+.experiment-cards h3 { margin: 4px 0; color: #cbd7e7; font-size: 12px; }
+.experiment-cards small, .experiment-cards time { color: #5f6d80; font-size: 9px; }
+.synthetic-tag, .dataset-tag { width: fit-content; display: block; margin-top: 7px; padding: 3px 7px; border-radius: 9px; font-size: 7px; font-style: normal; font-weight: 700; letter-spacing: .8px; }
+.synthetic-tag { color: #d8b94e; background: #28200c; border: 1px solid #4c3d16; }
+.dataset-tag { color: #93c5fd; background: #102239; border: 1px solid #27496d; }
+.mini-metrics { display: flex; gap: 8px; }
+.mini-metrics span { min-width: 78px; padding: 7px 9px; color: #65758b; background: #0a121e; border: 1px solid #1b293b; border-radius: 7px; font-size: 8px; }
+.mini-metrics b { display: block; margin-top: 3px; color: #bfdbfe; font-size: 11px; }
+.comparison-panel { padding: 0; overflow: hidden; }
+.comparison-panel > .panel-head { padding: 16px 18px 0; }
+.comparison-panel table { min-width: 1050px; }
+.error-count { color: #fbbf24; }
+.no-results { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; padding: 30px; color: #526175; text-align: center; }
+.no-results svg { margin-bottom: 5px; color: #64748b; }
+.no-results strong { color: #8b99ac; font-size: 12px; }
+.no-results span { font-size: 10px; }
+.prediction-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 0 18px 18px; }
+.prediction-grid article { display: grid; gap: 7px; padding: 14px; background: #0a121e; border: 1px solid #1b293b; border-radius: 9px; }
+.prediction-grid article > strong { font-size: 20px; }
+.prediction-grid small, .prediction-grid time { color: #607087; font-size: 9px; }
+.prediction-label { width: fit-content; padding: 3px 7px; border-radius: 9px; font-size: 8px; font-weight: 700; text-transform: uppercase; }
+.prediction-label.benign { color: #6ee7b7; background: #0c211d; border: 1px solid #1d493d; }
+.prediction-label.malicious { color: #fca5a5; background: #2b1118; border: 1px solid #57232e; }
+.dataset-research .research-note { margin-top: 0; }
 
 @media (max-width: 1000px) {
   .dataset-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .events-layout { grid-template-columns: 1fr; }
   .import-history { max-height: none; }
+  .experiment-layout { grid-template-columns: 1fr; }
+  .experiment-cards > article { grid-template-columns: 1fr; gap: 10px; }
+  .prediction-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -227,4 +268,10 @@ footer b { color: #748399; }
   .events-table td[data-label='Features'] { display: block; }
   .import-row { grid-template-columns: auto minmax(0, 1fr) auto; }
   .import-row b { grid-column: 2 / -1; justify-self: start; }
+  .mini-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .mini-metrics span { min-width: 0; }
+  .prediction-grid { grid-template-columns: 1fr; padding-inline: 0; }
+  .comparison-panel { overflow: visible; background: transparent; border: 0; }
+  .comparison-panel > .panel-head { padding-inline: 2px; }
+  .comparison-panel table { min-width: 0; }
 }

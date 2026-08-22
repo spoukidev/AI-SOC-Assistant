@@ -12,3 +12,6 @@ coverage/
 .idea/
 .vscode/
 *.log
+backend/artifacts/
+ml/models/*.joblib
+ml/models/*.json

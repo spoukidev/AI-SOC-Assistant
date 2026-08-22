@@ -43,3 +43,21 @@ def test_csv_upload_rejects_wrong_extension():
     with TestClient(app) as client:
         response = client.post("/api/events/import", files={"file": ("flows.exe", b"not csv", "application/octet-stream")})
         assert response.status_code == 415
+
+
+def test_experiment_training_stores_real_metrics_and_model():
+    from app.ml.demo_data import generate_labeled_demo_csv
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/experiments",
+            data={"model_name": "logistic_regression", "name": "Synthetic API smoke test", "random_seed": "23"},
+            files={"file": ("synthetic-labeled-demo.csv", generate_labeled_demo_csv(20), "text/csv")},
+        )
+        assert response.status_code == 201
+        payload = response.json()
+        metrics = payload["experiment"]["metrics"]
+        assert "precision" in metrics and "false_positive" in metrics
+        assert payload["model"]["feature_schema"] == "flow-v1"
+        research = client.get("/api/research/metrics").json()
+        assert research["available"] is True
