@@ -13,7 +13,7 @@ def test_health_and_demo_dashboard():
         response = client.get("/api/dashboard")
         assert response.status_code == 200
         data = response.json()
-        assert data["data_label"] == "SYNTHETIC DEMO DATA"
+        assert data["data_label"] == "SYNTHETIC DEMO DATA + USER DATA"
         assert data["metrics"]["average_model_confidence"] is None
 
 
@@ -61,3 +61,25 @@ def test_experiment_training_stores_real_metrics_and_model():
         assert payload["model"]["feature_schema"] == "flow-v1"
         research = client.get("/api/research/metrics").json()
         assert research["available"] is True
+
+
+def test_alert_detail_and_workflow_update_preserve_evidence():
+    with TestClient(app) as client:
+        alerts = client.get("/api/alerts").json()
+        assert alerts and alerts[0]["risk_score"] is not None
+        alert_id = alerts[0]["id"]
+        before = client.get(f"/api/alerts/{alert_id}").json()
+        assert before["event"]["raw_event"]
+        assert before["explanation"] is None
+        response = client.patch(f"/api/alerts/{alert_id}", json={"status": "Investigating", "assigned_analyst": "Analyst One"})
+        assert response.status_code == 200
+        updated = response.json()
+        assert updated["status"] == "Investigating"
+        assert updated["assigned_analyst"] == "Analyst One"
+        assert updated["evidence"] == before["evidence"]
+
+
+def test_alert_workflow_rejects_unknown_status():
+    with TestClient(app) as client:
+        alert_id = client.get("/api/alerts").json()[0]["id"]
+        assert client.patch(f"/api/alerts/{alert_id}", json={"status": "Deleted"}).status_code == 422

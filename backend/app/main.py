@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 from starlette.concurrency import run_in_threadpool
@@ -16,7 +17,9 @@ from .database import Base, SessionLocal, engine, get_db
 from .ml.detector import BaseDetector, DETECTORS
 from .ml.preprocessing import MODEL_FEATURES, feature_frame
 from .ml.training import train_experiment
-from .models import Alert, Experiment, FeatureVector, ImportBatch, Incident, ModelVersion, NetworkEvent, Prediction, Severity
+from .models import Alert, AlertAssessment, Experiment, FeatureVector, ImportBatch, Incident, ModelVersion, NetworkEvent, Prediction, Severity
+from .security.alert_engine import create_ml_alert
+from .security.risk_score import calculate_risk
 from .seed import seed_demo_data
 from .services.csv_ingestion import read_csv_upload
 
@@ -30,14 +33,14 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.3.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                    allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type", "Authorization"])
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "healthy", "service": "backend", "milestone": 3}
+    return {"status": "healthy", "service": "backend", "milestone": 4}
 
 
 def serialize_event(event: NetworkEvent) -> dict:
@@ -49,17 +52,24 @@ def serialize_event(event: NetworkEvent) -> dict:
 
 
 def serialize_alert(alert: Alert) -> dict:
+    assessment = alert.assessment
     return {"id": alert.id, "timestamp": alert.created_at, "severity": alert.severity.value,
             "source": alert.event.src_ip, "destination": alert.event.dst_ip,
             "destination_port": alert.event.dst_port, "protocol": alert.event.protocol,
             "detection": alert.title, "prediction": alert.prediction,
             "model_probability": alert.model_probability, "evidence_type": alert.evidence_type,
-            "evidence": alert.evidence, "status": alert.status, "synthetic": True}
+            "evidence": alert.evidence, "status": alert.status,
+            "risk_score": assessment.risk_score if assessment else None,
+            "risk_components": {"model_evidence": assessment.model_evidence, "rule_evidence": assessment.rule_evidence,
+                "asset_context": assessment.asset_context, "repeated_activity": assessment.repeated_activity} if assessment else None,
+            "assigned_analyst": assessment.assigned_analyst if assessment else None,
+            "updated_at": assessment.updated_at if assessment else alert.created_at,
+            "synthetic": alert.event.source == "SYNTHETIC DEMO DATA"}
 
 
 @app.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db)) -> dict:
-    alerts = list(db.scalars(select(Alert).options(joinedload(Alert.event)).order_by(Alert.created_at.desc())).all())
+    alerts = list(db.scalars(select(Alert).options(joinedload(Alert.event), joinedload(Alert.assessment)).order_by(Alert.created_at.desc())).all())
     events_count = db.scalar(select(func.count(NetworkEvent.id))) or 0
     incidents_count = db.scalar(select(func.count(Incident.id)).where(Incident.status == "Open")) or 0
     severity_counts = {severity.value: 0 for severity in Severity}
@@ -70,10 +80,12 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
         protocol_counts[alert.event.protocol] = protocol_counts.get(alert.event.protocol, 0) + 1
         key = alert.created_at.strftime("%H:%M")
         timeline[key] = timeline.get(key, 0) + 1
-    return {"data_label": "SYNTHETIC DEMO DATA", "metrics": {"active_alerts": len(alerts),
+    active = [item for item in alerts if item.status not in ("Resolved", "False Positive")]
+    confidences = [item.model_probability for item in alerts if item.model_probability is not None]
+    return {"data_label": "SYNTHETIC DEMO DATA + USER DATA", "metrics": {"active_alerts": len(active),
             "critical_alerts": severity_counts["Critical"], "high_alerts": severity_counts["High"],
             "open_incidents": incidents_count, "events_analyzed": events_count,
-            "average_model_confidence": None}, "alerts_by_severity": severity_counts,
+            "average_model_confidence": sum(confidences) / len(confidences) if confidences else None}, "alerts_by_severity": severity_counts,
             "alerts_by_protocol": [{"name": k, "value": v} for k, v in protocol_counts.items()],
             "alerts_over_time": [{"time": k, "alerts": v} for k, v in sorted(timeline.items())],
             "recent_alerts": [serialize_alert(a) for a in alerts[:8]]}
@@ -170,17 +182,63 @@ def dataset_profile(db: Session = Depends(get_db)) -> dict:
 
 
 @app.get("/api/alerts")
-def alerts(db: Session = Depends(get_db)) -> list[dict]:
-    items = db.scalars(select(Alert).options(joinedload(Alert.event)).order_by(Alert.created_at.desc())).all()
+def alerts(
+    status: str | None = None, severity: Severity | None = None,
+    limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = select(Alert).options(joinedload(Alert.event), joinedload(Alert.assessment)).order_by(Alert.created_at.desc())
+    if status:
+        statement = statement.where(Alert.status == status)
+    if severity:
+        statement = statement.where(Alert.severity == severity)
+    items = db.scalars(statement.limit(limit)).all()
     return [serialize_alert(a) for a in items]
 
 
 @app.get("/api/alerts/{alert_id}")
 def alert(alert_id: int, db: Session = Depends(get_db)) -> dict:
-    item = db.scalar(select(Alert).where(Alert.id == alert_id).options(joinedload(Alert.event)))
+    item = db.scalar(select(Alert).where(Alert.id == alert_id).options(
+        joinedload(Alert.event).joinedload(NetworkEvent.feature_vector), joinedload(Alert.assessment)))
     if not item:
         raise HTTPException(404, "Alert not found")
-    return {**serialize_alert(item), "event": serialize_event(item.event), "mitre_mappings": []}
+    return {**serialize_alert(item), "event": serialize_event(item.event), "mitre_mappings": [],
+            "explanation": None, "explanation_status": "Planned for Milestone 5"}
+
+
+class AlertUpdate(BaseModel):
+    status: str | None = None
+    assigned_analyst: str | None = Field(default=None, max_length=100)
+
+
+@app.patch("/api/alerts/{alert_id}")
+def update_alert(alert_id: int, update: AlertUpdate, db: Session = Depends(get_db)) -> dict:
+    item = db.scalar(select(Alert).where(Alert.id == alert_id).options(joinedload(Alert.event), joinedload(Alert.assessment)))
+    if not item:
+        raise HTTPException(404, "Alert not found")
+    if update.status is not None:
+        allowed = {"New", "Investigating", "Escalated", "Resolved", "False Positive"}
+        if update.status not in allowed:
+            raise HTTPException(422, f"status must be one of: {', '.join(sorted(allowed))}")
+        item.status = update.status
+    if not item.assessment:
+        risk = calculate_risk(probability=item.model_probability, rule_strength=25 if "rule" in item.evidence_type.lower() else 0)
+        item.assessment = AlertAssessment(alert_id=item.id, risk_score=risk.score,
+            model_evidence=risk.model_evidence, rule_evidence=risk.rule_evidence,
+            asset_context=risk.asset_context, repeated_activity=risk.repeated_activity,
+            updated_at=datetime.now(timezone.utc))
+    if "assigned_analyst" in update.model_fields_set:
+        item.assessment.assigned_analyst = update.assigned_analyst.strip() if update.assigned_analyst else None
+    item.assessment.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return serialize_alert(item)
+
+
+@app.get("/api/detection-rules")
+def detection_rules() -> list[dict]:
+    return [{"id": "demo-unusual-connection-v1", "name": "Demo unusual connection behavior",
+             "enabled": True, "scope": "SYNTHETIC DEMO DATA only", "evidence":
+             "Seeded events explicitly marked with repeated attempts, sequential ports, or multiple destinations.",
+             "risk_points": 25, "limitations": "This deterministic demo rule is not a production IDS signature."}]
 
 
 @app.get("/api/incidents")
@@ -316,12 +374,15 @@ def predict_event(model_id: int, event_id: int, db: Session = Depends(get_db)) -
         probability=probability, inference_time_ms=elapsed_ms, created_at=datetime.now(timezone.utc),
     )
     db.add(prediction)
+    db.flush()
+    generated_alert = create_ml_alert(db, event, prediction, model_version.model_name, model_version.version)
     db.commit()
     return {
         "id": prediction.id, "event_id": event.id, "model": serialize_model(model_version),
         "predicted_label": prediction.predicted_label, "probability": probability,
         "inference_time_ms": elapsed_ms, "evidence_type": "ML prediction",
-        "severity": None, "explanation": None,
+        "severity": generated_alert.severity.value if generated_alert else None,
+        "alert_id": generated_alert.id if generated_alert else None, "explanation": None,
     }
 
 

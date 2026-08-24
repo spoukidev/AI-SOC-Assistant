@@ -3,11 +3,26 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import Alert, Incident, NetworkEvent, Severity
+from .models import Alert, AlertAssessment, Incident, NetworkEvent, Severity
+from .security.risk_score import calculate_risk, severity_for_score
 
 
 def seed_demo_data(db: Session) -> None:
     if db.scalar(select(func.count(NetworkEvent.id))):
+        existing_alerts = db.scalars(select(Alert)).all()
+        for alert in existing_alerts:
+            if alert.assessment:
+                alert.severity = severity_for_score(alert.assessment.risk_score)
+                continue
+            risk = calculate_risk(probability=alert.model_probability,
+                                  rule_strength=25 if "rule" in alert.evidence_type.lower() else 0,
+                                  repeated_activity=8 if "Repeated" in alert.evidence or "Multiple" in alert.evidence else 2)
+            alert.severity = risk.severity
+            db.add(AlertAssessment(alert_id=alert.id, risk_score=risk.score,
+                                   model_evidence=risk.model_evidence, rule_evidence=risk.rule_evidence,
+                                   asset_context=risk.asset_context, repeated_activity=risk.repeated_activity,
+                                   updated_at=alert.created_at))
+        db.commit()
         return
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -35,10 +50,16 @@ def seed_demo_data(db: Session) -> None:
         if evidence:
             alert_events.append(event)
             db.flush()
-            severity = Severity.high if dport in (22, 23, 445) else Severity.medium
-            db.add(Alert(event_id=event.id, title="Demo rule: unusual connection behavior", severity=severity,
-                         prediction="Rule match", model_probability=None, evidence_type="Synthetic deterministic rule",
-                         evidence=evidence, status="New", created_at=timestamp))
+            assessment = calculate_risk(rule_strength=25, repeated_activity=8 if src == "10.20.3.91" else 2)
+            alert = Alert(event_id=event.id, title="Demo rule: unusual connection behavior", severity=assessment.severity,
+                          prediction="Rule match", model_probability=None, evidence_type="Synthetic deterministic rule",
+                          evidence=evidence, status="New", created_at=timestamp)
+            db.add(alert)
+            db.flush()
+            db.add(AlertAssessment(alert_id=alert.id, risk_score=assessment.score,
+                                   model_evidence=assessment.model_evidence, rule_evidence=assessment.rule_evidence,
+                                   asset_context=assessment.asset_context, repeated_activity=assessment.repeated_activity,
+                                   updated_at=timestamp))
 
     db.add(Incident(title="Synthetic reconnaissance-like activity", severity=Severity.high, status="Open",
                     summary="Three synthetic alerts share a source and occur within a short time window. This is demo correlation, not proof of malicious activity.",

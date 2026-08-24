@@ -73,6 +73,22 @@ class Alert(Base):
     status: Mapped[str] = mapped_column(String(32), default="New")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     event: Mapped[NetworkEvent] = relationship(back_populates="alert")
+    assessment: Mapped["AlertAssessment | None"] = relationship(back_populates="alert", uselist=False)
+
+
+class AlertAssessment(Base):
+    """Milestone 4 risk/workflow data kept separate for migration-safe upgrades."""
+    __tablename__ = "alert_assessments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id"), unique=True, index=True)
+    risk_score: Mapped[int] = mapped_column(Integer)
+    model_evidence: Mapped[int] = mapped_column(Integer, default=0)
+    rule_evidence: Mapped[int] = mapped_column(Integer, default=0)
+    asset_context: Mapped[int] = mapped_column(Integer, default=0)
+    repeated_activity: Mapped[int] = mapped_column(Integer, default=0)
+    assigned_analyst: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    alert: Mapped[Alert] = relationship(back_populates="assessment")
 
 
 class Incident(Base):

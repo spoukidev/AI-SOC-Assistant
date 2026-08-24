@@ -2,7 +2,7 @@
 
 An evidence-first research platform for network intrusion detection, explainable machine learning, and SOC investigation workflows.
 
-> **Current status — Milestone 3:** validated ingestion and deterministic feature engineering plus reproducible Logistic Regression, Random Forest, and XGBoost experiments, persisted model versions, measured evaluation metrics, and event-level inference. Synthetic experiments are explicitly labeled and are not evidence of real-world performance.
+> **Current status — Milestone 4:** validated ingestion and deterministic feature engineering; reproducible Logistic Regression, Random Forest, and XGBoost experiments; plus evidence-linked alert generation, transparent multi-factor risk scoring, triage workflow, and alert investigation. Synthetic experiments are explicitly labeled and are not evidence of real-world performance.
 
 ## Research objective
 
