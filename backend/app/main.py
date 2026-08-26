@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
@@ -69,8 +69,18 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
 
 
 @app.get("/api/events")
-def events(db: Session = Depends(get_db)) -> list[dict]:
-    return [serialize_event(e) for e in db.scalars(select(NetworkEvent).order_by(NetworkEvent.timestamp.desc())).all()]
+def events(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = (
+        select(NetworkEvent)
+        .order_by(NetworkEvent.timestamp.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return [serialize_event(e) for e in db.scalars(statement).all()]
 
 
 @app.get("/api/events/{event_id}")
@@ -82,8 +92,19 @@ def event(event_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @app.get("/api/alerts")
-def alerts(db: Session = Depends(get_db)) -> list[dict]:
-    items = db.scalars(select(Alert).options(joinedload(Alert.event)).order_by(Alert.created_at.desc())).all()
+def alerts(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = (
+        select(Alert)
+        .options(joinedload(Alert.event))
+        .order_by(Alert.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    items = db.scalars(statement).all()
     return [serialize_alert(a) for a in items]
 
 
