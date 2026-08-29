@@ -117,10 +117,20 @@ def alert(alert_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @app.get("/api/incidents")
-def incidents(db: Session = Depends(get_db)) -> list[dict]:
+def incidents(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = (
+        select(Incident)
+        .order_by(Incident.last_seen.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     return [{"id": i.id, "title": i.title, "severity": i.severity.value, "status": i.status,
              "summary": i.summary, "first_seen": i.first_seen, "last_seen": i.last_seen, "synthetic": True}
-            for i in db.scalars(select(Incident).order_by(Incident.last_seen.desc())).all()]
+            for i in db.scalars(statement).all()]
 
 
 @app.get("/api/research/metrics")

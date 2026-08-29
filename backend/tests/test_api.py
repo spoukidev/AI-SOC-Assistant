@@ -51,3 +51,22 @@ def test_alert_listing_is_bounded_and_pageable():
 
         assert client.get("/api/alerts", params={"limit": 101}).status_code == 422
         assert client.get("/api/alerts", params={"offset": -1}).status_code == 422
+
+
+def test_incident_listing_is_bounded_and_pageable():
+    with TestClient(app) as client:
+        all_incidents = client.get("/api/incidents")
+        assert all_incidents.status_code == 200
+        assert len(all_incidents.json()) >= 2
+
+        first_page = client.get("/api/incidents", params={"limit": 1})
+        second_page = client.get("/api/incidents", params={"limit": 1, "offset": 1})
+
+        assert first_page.status_code == 200
+        assert second_page.status_code == 200
+        assert len(first_page.json()) == 1
+        assert len(second_page.json()) == 1
+        assert first_page.json()[0]["id"] != second_page.json()[0]["id"]
+
+        assert client.get("/api/incidents", params={"limit": 101}).status_code == 422
+        assert client.get("/api/incidents", params={"offset": -1}).status_code == 422
