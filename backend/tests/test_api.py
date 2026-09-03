@@ -53,6 +53,37 @@ def test_alert_listing_is_bounded_and_pageable():
         assert client.get("/api/alerts", params={"offset": -1}).status_code == 422
 
 
+def test_alert_listing_supports_triage_filters():
+    with TestClient(app) as client:
+        all_alerts = client.get("/api/alerts")
+        assert all_alerts.status_code == 200
+        alerts = all_alerts.json()
+        assert alerts
+
+        severity = alerts[0]["severity"]
+        status = alerts[0]["status"]
+
+        by_severity = client.get("/api/alerts", params={"severity": severity})
+        assert by_severity.status_code == 200
+        assert by_severity.json()
+        assert all(item["severity"] == severity for item in by_severity.json())
+
+        by_status = client.get("/api/alerts", params={"status": status})
+        assert by_status.status_code == 200
+        assert by_status.json()
+        assert all(item["status"] == status for item in by_status.json())
+
+        combined = client.get("/api/alerts", params={"severity": severity, "status": status})
+        assert combined.status_code == 200
+        assert all(
+            item["severity"] == severity and item["status"] == status
+            for item in combined.json()
+        )
+
+        assert client.get("/api/alerts", params={"severity": "NotASeverity"}).status_code == 422
+        assert client.get("/api/alerts", params={"status": ""}).status_code == 422
+
+
 def test_incident_listing_is_bounded_and_pageable():
     with TestClient(app) as client:
         all_incidents = client.get("/api/incidents")

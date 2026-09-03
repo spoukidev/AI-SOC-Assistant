@@ -95,15 +95,16 @@ def event(event_id: int, db: Session = Depends(get_db)) -> dict:
 def alerts(
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    severity: Severity | None = Query(default=None),
+    status: str | None = Query(default=None, min_length=1, max_length=32),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    statement = (
-        select(Alert)
-        .options(joinedload(Alert.event))
-        .order_by(Alert.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    statement = select(Alert).options(joinedload(Alert.event))
+    if severity is not None:
+        statement = statement.where(Alert.severity == severity)
+    if status is not None:
+        statement = statement.where(Alert.status == status)
+    statement = statement.order_by(Alert.created_at.desc()).offset(offset).limit(limit)
     items = db.scalars(statement).all()
     return [serialize_alert(a) for a in items]
 
