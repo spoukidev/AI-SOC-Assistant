@@ -1,10 +1,15 @@
 import os
+from datetime import datetime, timezone
 
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["SEED_DEMO_DATA"] = "true"
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from app.database import SessionLocal
 from app.main import app
+from app.models import Alert
 
 
 def test_health_and_demo_dashboard():
@@ -51,6 +56,26 @@ def test_alert_listing_is_bounded_and_pageable():
 
         assert client.get("/api/alerts", params={"limit": 101}).status_code == 422
         assert client.get("/api/alerts", params={"offset": -1}).status_code == 422
+
+
+def test_alert_pagination_is_stable_when_timestamps_tie():
+    with TestClient(app) as client:
+        with SessionLocal() as db:
+            tied_alerts = list(db.scalars(select(Alert).order_by(Alert.id.desc()).limit(2)).all())
+            assert len(tied_alerts) == 2
+            tied_time = datetime(2100, 1, 1, tzinfo=timezone.utc)
+            expected_ids = sorted((item.id for item in tied_alerts), reverse=True)
+            for item in tied_alerts:
+                item.created_at = tied_time
+            db.commit()
+
+        first_page = client.get("/api/alerts", params={"limit": 1})
+        second_page = client.get("/api/alerts", params={"limit": 1, "offset": 1})
+
+        assert first_page.status_code == 200
+        assert second_page.status_code == 200
+        assert first_page.json()[0]["id"] == expected_ids[0]
+        assert second_page.json()[0]["id"] == expected_ids[1]
 
 
 def test_alert_listing_supports_triage_filters():
