@@ -76,7 +76,7 @@ def events(
 ) -> list[dict]:
     statement = (
         select(NetworkEvent)
-        .order_by(NetworkEvent.timestamp.desc())
+        .order_by(NetworkEvent.timestamp.desc(), NetworkEvent.id.desc())
         .offset(offset)
         .limit(limit)
     )
@@ -104,7 +104,7 @@ def alerts(
         statement = statement.where(Alert.severity == severity)
     if status is not None:
         statement = statement.where(Alert.status == status)
-    statement = statement.order_by(Alert.created_at.desc()).offset(offset).limit(limit)
+    statement = statement.order_by(Alert.created_at.desc(), Alert.id.desc()).offset(offset).limit(limit)
     items = db.scalars(statement).all()
     return [serialize_alert(a) for a in items]
 
@@ -125,7 +125,7 @@ def incidents(
 ) -> list[dict]:
     statement = (
         select(Incident)
-        .order_by(Incident.last_seen.desc())
+        .order_by(Incident.last_seen.desc(), Incident.id.desc())
         .offset(offset)
         .limit(limit)
     )
