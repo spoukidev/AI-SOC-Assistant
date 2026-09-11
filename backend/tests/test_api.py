@@ -19,7 +19,15 @@ def test_health_and_demo_dashboard():
         assert response.status_code == 200
         data = response.json()
         assert data["data_label"] == "SYNTHETIC DEMO DATA"
-        assert data["metrics"]["average_model_confidence"] is None
+
+        with SessionLocal() as db:
+            probabilities = [
+                probability
+                for probability in db.scalars(select(Alert.model_probability)).all()
+                if probability is not None
+            ]
+        expected_average = round(sum(probabilities) / len(probabilities), 4)
+        assert data["metrics"]["average_model_confidence"] == expected_average
 
 
 def test_research_metrics_are_not_fabricated():
