@@ -54,6 +54,14 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
     severity_counts = {severity.value: 0 for severity in Severity}
     protocol_counts: dict[str, int] = {}
     timeline: dict[str, int] = {}
+    model_probabilities = [
+        alert.model_probability for alert in alerts if alert.model_probability is not None
+    ]
+    average_model_confidence = (
+        round(sum(model_probabilities) / len(model_probabilities), 4)
+        if model_probabilities
+        else None
+    )
     for alert in alerts:
         severity_counts[alert.severity.value] += 1
         protocol_counts[alert.event.protocol] = protocol_counts.get(alert.event.protocol, 0) + 1
@@ -62,7 +70,7 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
     return {"data_label": "SYNTHETIC DEMO DATA", "metrics": {"active_alerts": len(alerts),
             "critical_alerts": severity_counts["Critical"], "high_alerts": severity_counts["High"],
             "open_incidents": incidents_count, "events_analyzed": events_count,
-            "average_model_confidence": None}, "alerts_by_severity": severity_counts,
+            "average_model_confidence": average_model_confidence}, "alerts_by_severity": severity_counts,
             "alerts_by_protocol": [{"name": k, "value": v} for k, v in protocol_counts.items()],
             "alerts_over_time": [{"time": k, "alerts": v} for k, v in sorted(timeline.items())],
             "recent_alerts": [serialize_alert(a) for a in alerts[:8]]}
