@@ -30,6 +30,33 @@ def test_health_and_demo_dashboard():
         assert data["metrics"]["average_model_confidence"] == expected_average
 
 
+def test_dashboard_ignores_invalid_model_probabilities():
+    with TestClient(app) as client:
+        with SessionLocal() as db:
+            alerts = list(db.scalars(select(Alert).order_by(Alert.id).limit(2)).all())
+            assert len(alerts) == 2
+            alerts[0].model_probability = -0.25
+            alerts[1].model_probability = 1.25
+            invalid_ids = {alert.id for alert in alerts}
+            db.commit()
+
+            valid_probabilities = [
+                probability
+                for probability in db.scalars(select(Alert.model_probability)).all()
+                if probability is not None and 0.0 <= probability <= 1.0
+            ]
+
+        dashboard = client.get("/api/dashboard")
+        assert dashboard.status_code == 200
+        expected_average = round(sum(valid_probabilities) / len(valid_probabilities), 4)
+        assert dashboard.json()["metrics"]["average_model_confidence"] == expected_average
+
+        for alert_id in invalid_ids:
+            response = client.get(f"/api/alerts/{alert_id}")
+            assert response.status_code == 200
+            assert response.json()["model_probability"] is None
+
+
 def test_research_metrics_are_not_fabricated():
     with TestClient(app) as client:
         data = client.get("/api/research/metrics").json()

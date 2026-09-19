@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import math
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,12 +38,19 @@ def serialize_event(event: NetworkEvent) -> dict:
             "tcp_flags": event.tcp_flags, "source": event.source, "raw_event": event.raw_event}
 
 
+def valid_model_probability(value: float | None) -> float | None:
+    """Return only finite probabilities in the model's documented [0, 1] range."""
+    if value is None or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        return None
+    return value
+
+
 def serialize_alert(alert: Alert) -> dict:
     return {"id": alert.id, "timestamp": alert.created_at, "severity": alert.severity.value,
             "source": alert.event.src_ip, "destination": alert.event.dst_ip,
             "destination_port": alert.event.dst_port, "protocol": alert.event.protocol,
             "detection": alert.title, "prediction": alert.prediction,
-            "model_probability": alert.model_probability, "evidence_type": alert.evidence_type,
+            "model_probability": valid_model_probability(alert.model_probability), "evidence_type": alert.evidence_type,
             "evidence": alert.evidence, "status": alert.status, "synthetic": True}
 
 
@@ -55,7 +63,9 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
     protocol_counts: dict[str, int] = {}
     timeline: dict[str, int] = {}
     model_probabilities = [
-        alert.model_probability for alert in alerts if alert.model_probability is not None
+        probability
+        for alert in alerts
+        if (probability := valid_model_probability(alert.model_probability)) is not None
     ]
     average_model_confidence = (
         round(sum(model_probabilities) / len(model_probabilities), 4)
