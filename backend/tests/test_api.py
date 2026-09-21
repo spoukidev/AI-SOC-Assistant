@@ -76,6 +76,7 @@ def test_event_listing_is_bounded_and_pageable():
 
         assert client.get("/api/events", params={"limit": 101}).status_code == 422
         assert client.get("/api/events", params={"offset": -1}).status_code == 422
+        assert client.get("/api/events", params={"offset": 100001}).status_code == 422
 
 
 def test_alert_listing_is_bounded_and_pageable():
@@ -91,6 +92,7 @@ def test_alert_listing_is_bounded_and_pageable():
 
         assert client.get("/api/alerts", params={"limit": 101}).status_code == 422
         assert client.get("/api/alerts", params={"offset": -1}).status_code == 422
+        assert client.get("/api/alerts", params={"offset": 100001}).status_code == 422
 
 
 def test_alert_pagination_is_stable_when_timestamps_tie():
@@ -161,3 +163,4 @@ def test_incident_listing_is_bounded_and_pageable():
 
         assert client.get("/api/incidents", params={"limit": 101}).status_code == 422
         assert client.get("/api/incidents", params={"offset": -1}).status_code == 422
+        assert client.get("/api/incidents", params={"offset": 100001}).status_code == 422
