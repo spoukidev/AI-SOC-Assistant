@@ -89,7 +89,7 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
 @app.get("/api/events")
 def events(
     limit: int = Query(default=100, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=100_000),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     statement = (
@@ -112,7 +112,7 @@ def event(event_id: int, db: Session = Depends(get_db)) -> dict:
 @app.get("/api/alerts")
 def alerts(
     limit: int = Query(default=100, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=100_000),
     severity: Severity | None = Query(default=None),
     status: str | None = Query(default=None, min_length=1, max_length=32),
     db: Session = Depends(get_db),
@@ -138,7 +138,7 @@ def alert(alert_id: int, db: Session = Depends(get_db)) -> dict:
 @app.get("/api/incidents")
 def incidents(
     limit: int = Query(default=100, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=100_000),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     statement = (
