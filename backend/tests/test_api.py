@@ -19,6 +19,8 @@ def test_health_and_demo_dashboard():
         assert response.status_code == 200
         data = response.json()
         assert data["data_label"] == "SYNTHETIC DEMO DATA"
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["pragma"] == "no-cache"
 
         with SessionLocal() as db:
             probabilities = [
@@ -28,6 +30,14 @@ def test_health_and_demo_dashboard():
             ]
         expected_average = round(sum(probabilities) / len(probabilities), 4)
         assert data["metrics"]["average_model_confidence"] == expected_average
+
+
+def test_non_api_health_endpoint_is_not_marked_as_api_data():
+    with TestClient(app) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert "cache-control" not in response.headers
+        assert "pragma" not in response.headers
 
 
 def test_dashboard_ignores_invalid_model_probabilities():
