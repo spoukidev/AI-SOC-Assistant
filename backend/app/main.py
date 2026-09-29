@@ -27,8 +27,11 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_cr
 
 
 @app.middleware("http")
-async def prevent_api_caching(request: Request, call_next):
+async def set_security_headers(request: Request, call_next):
     response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
