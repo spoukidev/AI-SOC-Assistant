@@ -12,6 +12,18 @@ from app.main import app
 from app.models import Alert, Incident
 
 
+SECURITY_HEADERS = {
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+def assert_security_headers(response):
+    for header, value in SECURITY_HEADERS.items():
+        assert response.headers[header] == value
+
+
 def test_health_and_demo_dashboard():
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
@@ -21,9 +33,7 @@ def test_health_and_demo_dashboard():
         assert data["data_label"] == "SYNTHETIC DEMO DATA"
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["pragma"] == "no-cache"
-        assert response.headers["x-content-type-options"] == "nosniff"
-        assert response.headers["referrer-policy"] == "no-referrer"
-        assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
+        assert_security_headers(response)
 
         with SessionLocal() as db:
             probabilities = [
@@ -41,9 +51,22 @@ def test_non_api_health_endpoint_is_not_marked_as_api_data():
         assert response.status_code == 200
         assert "cache-control" not in response.headers
         assert "pragma" not in response.headers
-        assert response.headers["x-content-type-options"] == "nosniff"
-        assert response.headers["referrer-policy"] == "no-referrer"
-        assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
+        assert_security_headers(response)
+
+
+def test_security_headers_are_present_on_api_error_responses():
+    with TestClient(app) as client:
+        not_found = client.get("/api/events/999999")
+        invalid_query = client.get("/api/events", params={"limit": 101})
+
+        assert not_found.status_code == 404
+        assert invalid_query.status_code == 422
+        assert_security_headers(not_found)
+        assert_security_headers(invalid_query)
+        assert not_found.headers["cache-control"] == "no-store"
+        assert invalid_query.headers["cache-control"] == "no-store"
+        assert not_found.headers["pragma"] == "no-cache"
+        assert invalid_query.headers["pragma"] == "no-cache"
 
 
 def test_dashboard_ignores_invalid_model_probabilities():
