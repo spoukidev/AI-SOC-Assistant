@@ -22,8 +22,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
-                   allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type", "Authorization"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    # The current API is read-only; do not advertise mutation methods until routes exist.
+    allow_methods=["GET"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 
 @app.middleware("http")
