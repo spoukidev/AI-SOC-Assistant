@@ -1,5 +1,7 @@
 # Explainable AI SOC Assistant
 
+[![CI](https://github.com/spoukidev/AI-SOC-Assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/spoukidev/AI-SOC-Assistant/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An evidence-first research platform for network intrusion detection, explainable machine learning, and SOC investigation workflows.
 
 > **Current status — Milestone 1:** runnable application foundation, PostgreSQL persistence, synthetic demo events, dashboard API, and SOC dashboard shell. Detection scores shown in this milestone are deterministic demo labels—not trained-model results.
