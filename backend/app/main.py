@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
+import math
 
 import json
 from pathlib import Path
 from time import perf_counter
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -34,8 +35,26 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
-                   allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type", "Authorization"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    # Only advertise the methods implemented by the API (reads, CSV import/training, alert triage).
+    allow_methods=["GET", "POST", "PATCH"],
+    allow_headers=["Content-Type", "Authorization"],
+)
+
+
+@app.middleware("http")
+async def set_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/health")
@@ -51,13 +70,20 @@ def serialize_event(event: NetworkEvent) -> dict:
             "features": event.feature_vector.features if event.feature_vector else None}
 
 
+def valid_model_probability(value: float | None) -> float | None:
+    """Return only finite probabilities in the model's documented [0, 1] range."""
+    if value is None or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        return None
+    return value
+
+
 def serialize_alert(alert: Alert) -> dict:
     assessment = alert.assessment
     return {"id": alert.id, "timestamp": alert.created_at, "severity": alert.severity.value,
             "source": alert.event.src_ip, "destination": alert.event.dst_ip,
             "destination_port": alert.event.dst_port, "protocol": alert.event.protocol,
             "detection": alert.title, "prediction": alert.prediction,
-            "model_probability": alert.model_probability, "evidence_type": alert.evidence_type,
+            "model_probability": valid_model_probability(alert.model_probability), "evidence_type": alert.evidence_type,
             "evidence": alert.evidence, "status": alert.status,
             "risk_score": assessment.risk_score if assessment else None,
             "risk_components": {"model_evidence": assessment.model_evidence, "rule_evidence": assessment.rule_evidence,
@@ -75,17 +101,26 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
     severity_counts = {severity.value: 0 for severity in Severity}
     protocol_counts: dict[str, int] = {}
     timeline: dict[str, int] = {}
+    model_probabilities = [
+        probability
+        for alert in alerts
+        if (probability := valid_model_probability(alert.model_probability)) is not None
+    ]
+    average_model_confidence = (
+        round(sum(model_probabilities) / len(model_probabilities), 4)
+        if model_probabilities
+        else None
+    )
     for alert in alerts:
         severity_counts[alert.severity.value] += 1
         protocol_counts[alert.event.protocol] = protocol_counts.get(alert.event.protocol, 0) + 1
         key = alert.created_at.strftime("%H:%M")
         timeline[key] = timeline.get(key, 0) + 1
     active = [item for item in alerts if item.status not in ("Resolved", "False Positive")]
-    confidences = [item.model_probability for item in alerts if item.model_probability is not None]
     return {"data_label": "SYNTHETIC DEMO DATA + USER DATA", "metrics": {"active_alerts": len(active),
             "critical_alerts": severity_counts["Critical"], "high_alerts": severity_counts["High"],
             "open_incidents": incidents_count, "events_analyzed": events_count,
-            "average_model_confidence": sum(confidences) / len(confidences) if confidences else None}, "alerts_by_severity": severity_counts,
+            "average_model_confidence": average_model_confidence}, "alerts_by_severity": severity_counts,
             "alerts_by_protocol": [{"name": k, "value": v} for k, v in protocol_counts.items()],
             "alerts_over_time": [{"time": k, "alerts": v} for k, v in sorted(timeline.items())],
             "recent_alerts": [serialize_alert(a) for a in alerts[:8]]}
@@ -93,18 +128,19 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
 
 @app.get("/api/events")
 def events(
-    protocol: str | None = None,
-    source: str | None = None,
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    protocol: str | None = Query(default=None, min_length=1, max_length=16),
+    source: str | None = Query(default=None, min_length=1, max_length=300),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    statement = select(NetworkEvent).options(joinedload(NetworkEvent.feature_vector)).order_by(NetworkEvent.timestamp.desc())
+    statement = select(NetworkEvent).options(joinedload(NetworkEvent.feature_vector))
     if protocol:
         statement = statement.where(NetworkEvent.protocol == protocol.upper())
     if source:
         statement = statement.where(NetworkEvent.source == source)
-    return [serialize_event(e) for e in db.scalars(statement.offset(offset).limit(limit)).all()]
+    statement = statement.order_by(NetworkEvent.timestamp.desc(), NetworkEvent.id.desc()).offset(offset).limit(limit)
+    return [serialize_event(e) for e in db.scalars(statement).all()]
 
 
 @app.get("/api/events/{event_id}")
@@ -183,15 +219,19 @@ def dataset_profile(db: Session = Depends(get_db)) -> dict:
 
 @app.get("/api/alerts")
 def alerts(
-    status: str | None = None, severity: Severity | None = None,
-    limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
+    severity: Severity | None = Query(default=None),
+    status: str | None = Query(default=None, min_length=1, max_length=32),
+    db: Session = Depends(get_db),
 ) -> list[dict]:
-    statement = select(Alert).options(joinedload(Alert.event), joinedload(Alert.assessment)).order_by(Alert.created_at.desc())
-    if status:
-        statement = statement.where(Alert.status == status)
-    if severity:
+    statement = select(Alert).options(joinedload(Alert.event), joinedload(Alert.assessment))
+    if severity is not None:
         statement = statement.where(Alert.severity == severity)
-    items = db.scalars(statement.limit(limit)).all()
+    if status is not None:
+        statement = statement.where(Alert.status == status)
+    statement = statement.order_by(Alert.created_at.desc(), Alert.id.desc()).offset(offset).limit(limit)
+    items = db.scalars(statement).all()
     return [serialize_alert(a) for a in items]
 
 
@@ -242,10 +282,20 @@ def detection_rules() -> list[dict]:
 
 
 @app.get("/api/incidents")
-def incidents(db: Session = Depends(get_db)) -> list[dict]:
+def incidents(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = (
+        select(Incident)
+        .order_by(Incident.last_seen.desc(), Incident.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     return [{"id": i.id, "title": i.title, "severity": i.severity.value, "status": i.status,
              "summary": i.summary, "first_seen": i.first_seen, "last_seen": i.last_seen, "synthetic": True}
-            for i in db.scalars(select(Incident).order_by(Incident.last_seen.desc())).all()]
+            for i in db.scalars(statement).all()]
 
 
 @app.get("/api/research/metrics")

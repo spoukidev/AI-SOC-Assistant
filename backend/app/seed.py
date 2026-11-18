@@ -50,9 +50,12 @@ def seed_demo_data(db: Session) -> None:
         if evidence:
             alert_events.append(event)
             db.flush()
-            assessment = calculate_risk(rule_strength=25, repeated_activity=8 if src == "10.20.3.91" else 2)
+            # Deterministic synthetic scores so the dashboard confidence metric is populated.
+            probability = {22: 0.91, 23: 0.84, 445: 0.78, 3389: 0.71}.get(dport, 0.6)
+            assessment = calculate_risk(probability=probability, rule_strength=25,
+                                        repeated_activity=8 if src == "10.20.3.91" else 2)
             alert = Alert(event_id=event.id, title="Demo rule: unusual connection behavior", severity=assessment.severity,
-                          prediction="Rule match", model_probability=None, evidence_type="Synthetic deterministic rule",
+                          prediction="Rule match", model_probability=probability, evidence_type="Synthetic deterministic rule",
                           evidence=evidence, status="New", created_at=timestamp)
             db.add(alert)
             db.flush()
@@ -64,4 +67,7 @@ def seed_demo_data(db: Session) -> None:
     db.add(Incident(title="Synthetic reconnaissance-like activity", severity=Severity.high, status="Open",
                     summary="Three synthetic alerts share a source and occur within a short time window. This is demo correlation, not proof of malicious activity.",
                     first_seen=now - timedelta(minutes=42), last_seen=now - timedelta(minutes=28)))
+    db.add(Incident(title="Synthetic remote-access probe", severity=Severity.medium, status="Open",
+                    summary="A later synthetic alert targets a remote-desktop service. This is demo data, not proof of malicious activity.",
+                    first_seen=now - timedelta(minutes=21), last_seen=now - timedelta(minutes=14)))
     db.commit()

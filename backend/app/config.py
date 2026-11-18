@@ -5,7 +5,8 @@ class Settings(BaseSettings):
     app_name: str = "Explainable AI SOC Assistant"
     database_url: str = "sqlite:///./soc_xai.db"
     backend_cors_origins: str = "http://localhost:5173"
-    seed_demo_data: bool = True
+    # Demo data must be explicitly enabled so a deployment cannot silently seed fixtures.
+    seed_demo_data: bool = False
     max_upload_bytes: int = 5 * 1024 * 1024
     max_import_rows: int = 10_000
     model_artifact_dir: str = "./artifacts/models"

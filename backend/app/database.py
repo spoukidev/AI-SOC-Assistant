@@ -9,18 +9,19 @@ class Base(DeclarativeBase):
     pass
 
 
-is_sqlite = settings.database_url.startswith("sqlite")
-connect_args = {"check_same_thread": False} if is_sqlite else {}
-engine_options = {
-    "pool_pre_ping": True,
-    "connect_args": connect_args,
-}
-if settings.database_url in {"sqlite://", "sqlite:///:memory:"}:
-    # In-memory SQLite databases belong to a connection. Reuse one connection
-    # so application lifespan setup and request sessions see the same schema.
-    engine_options["poolclass"] = StaticPool
-
-engine = create_engine(settings.database_url, **engine_options)
+connect_args = {}
+engine_kwargs = {"pool_pre_ping": True}
+if settings.database_url.startswith("sqlite"):
+    connect_args["check_same_thread"] = False
+    # In-memory SQLite databases belong to a single connection and vanish when it
+    # closes. StaticPool keeps one connection so lifespan's create_all() and later
+    # request sessions share the same schema.
+    if settings.database_url == "sqlite://" or ":memory:" in settings.database_url:
+        engine_kwargs["poolclass"] = StaticPool
+        # pool_pre_ping issues a checkout query that is unnecessary (and can
+        # confuse) a single shared in-memory connection.
+        engine_kwargs["pool_pre_ping"] = False
+engine = create_engine(settings.database_url, connect_args=connect_args, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
