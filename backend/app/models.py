@@ -72,8 +72,13 @@ class Alert(Base):
     evidence: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="New")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Milestone 5 links. Nullable so pre-Milestone 5 rows stay valid (see database.ensure_schema).
+    rule_id: Mapped[int | None] = mapped_column(ForeignKey("detection_rules.id"), nullable=True, index=True)
+    incident_id: Mapped[int | None] = mapped_column(ForeignKey("incidents.id"), nullable=True, index=True)
     event: Mapped[NetworkEvent] = relationship(back_populates="alert")
     assessment: Mapped["AlertAssessment | None"] = relationship(back_populates="alert", uselist=False)
+    rule: Mapped["DetectionRule | None"] = relationship(back_populates="alerts")
+    incident: Mapped["Incident | None"] = relationship(back_populates="alerts")
 
 
 class AlertAssessment(Base):
@@ -100,6 +105,27 @@ class Incident(Base):
     summary: Mapped[str] = mapped_column(Text)
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    alerts: Mapped[list[Alert]] = relationship(back_populates="incident", order_by="Alert.created_at")
+
+
+class DetectionRule(Base):
+    """Deterministic rule catalog entry. Rules carry explicit evidence and a bounded risk contribution."""
+    __tablename__ = "detection_rules"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    logic: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(String(200))
+    risk_points: Mapped[int] = mapped_column(Integer, default=25)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    limitations: Mapped[str] = mapped_column(Text)
+    built_in: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    alerts: Mapped[list[Alert]] = relationship(back_populates="rule")
 
 
 class Experiment(Base):

@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -14,33 +14,38 @@ from sqlalchemy.orm import Session, joinedload
 from starlette.concurrency import run_in_threadpool
 
 from .config import settings
-from .database import Base, SessionLocal, engine, get_db
+from .auth import authenticate, create_access_token, get_auth_config, login_throttle, require_user
+from .database import Base, SessionLocal, engine, ensure_schema, get_db
 from .ml.detector import BaseDetector, DETECTORS, validate_parameters
+from .ml.explain import safe_global_explanation, safe_local_explanation, unavailable
 from .ml.preprocessing import MODEL_FEATURES, feature_frame
 from .ml.training import train_experiment
-from .models import Alert, AlertAssessment, Experiment, FeatureVector, ImportBatch, Incident, ModelVersion, NetworkEvent, Prediction, Severity
+from .models import Alert, AlertAssessment, DetectionRule, Experiment, FeatureVector, ImportBatch, Incident, ModelVersion, NetworkEvent, Prediction, Severity
 from .security.alert_engine import create_ml_alert
 from .security.risk_score import calculate_risk
-from .seed import seed_demo_data
+from .seed import ensure_builtin_rules, seed_demo_data
 from .services.csv_ingestion import read_csv_upload
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
-    if settings.seed_demo_data:
-        with SessionLocal() as db:
+    ensure_schema(engine)
+    get_auth_config()  # fail fast on a weak AUTH_SECRET_KEY and log generated credentials once
+    with SessionLocal() as db:
+        ensure_builtin_rules(db)
+        if settings.seed_demo_data:
             seed_demo_data(db)
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.4.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.5.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=False,
-    # Only advertise the methods implemented by the API (reads, CSV import/training, alert triage).
-    allow_methods=["GET", "POST", "PATCH"],
+    # Only advertise the methods implemented by the API (reads, imports/training, triage, incident links).
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -57,9 +62,32 @@ async def set_security_headers(request: Request, call_next):
     return response
 
 
+# Every data endpoint is registered on this router and requires a valid bearer token.
+# Only /health and /api/auth/login stay open.
+api = APIRouter(dependencies=[Depends(require_user)])
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "healthy", "service": "backend", "milestone": 4}
+    return {"status": "healthy", "service": "backend", "milestone": 5}
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/api/auth/login")
+def login(credentials: LoginRequest, request: Request) -> dict:
+    client = request.client.host if request.client else "unknown"
+    if login_throttle.blocked(client):
+        raise HTTPException(429, "Too many failed login attempts. Try again later.")
+    if not authenticate(credentials.username, credentials.password):
+        login_throttle.fail(client)
+        raise HTTPException(401, "Invalid username or password", headers={"WWW-Authenticate": "Bearer"})
+    login_throttle.reset(client)
+    token, expires_in = create_access_token(credentials.username)
+    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in, "username": credentials.username}
 
 
 def serialize_event(event: NetworkEvent) -> dict:
@@ -90,14 +118,15 @@ def serialize_alert(alert: Alert) -> dict:
                 "asset_context": assessment.asset_context, "repeated_activity": assessment.repeated_activity} if assessment else None,
             "assigned_analyst": assessment.assigned_analyst if assessment else None,
             "updated_at": assessment.updated_at if assessment else alert.created_at,
-            "synthetic": alert.event.source == "SYNTHETIC DEMO DATA"}
+            "synthetic": alert.event.source == "SYNTHETIC DEMO DATA",
+            "rule_id": alert.rule_id, "incident_id": alert.incident_id}
 
 
-@app.get("/api/dashboard")
+@api.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db)) -> dict:
     alerts = list(db.scalars(select(Alert).options(joinedload(Alert.event), joinedload(Alert.assessment)).order_by(Alert.created_at.desc())).all())
     events_count = db.scalar(select(func.count(NetworkEvent.id))) or 0
-    incidents_count = db.scalar(select(func.count(Incident.id)).where(Incident.status == "Open")) or 0
+    incidents_count = db.scalar(select(func.count(Incident.id)).where(Incident.status.not_in(CLOSED_INCIDENT_STATUSES))) or 0
     severity_counts = {severity.value: 0 for severity in Severity}
     protocol_counts: dict[str, int] = {}
     timeline: dict[str, int] = {}
@@ -126,7 +155,7 @@ def dashboard(db: Session = Depends(get_db)) -> dict:
             "recent_alerts": [serialize_alert(a) for a in alerts[:8]]}
 
 
-@app.get("/api/events")
+@api.get("/api/events")
 def events(
     protocol: str | None = Query(default=None, min_length=1, max_length=16),
     source: str | None = Query(default=None, min_length=1, max_length=300),
@@ -143,7 +172,7 @@ def events(
     return [serialize_event(e) for e in db.scalars(statement).all()]
 
 
-@app.get("/api/events/{event_id}")
+@api.get("/api/events/{event_id}")
 def event(event_id: int, db: Session = Depends(get_db)) -> dict:
     item = db.scalar(select(NetworkEvent).where(NetworkEvent.id == event_id).options(joinedload(NetworkEvent.feature_vector)))
     if not item:
@@ -151,7 +180,7 @@ def event(event_id: int, db: Session = Depends(get_db)) -> dict:
     return serialize_event(item)
 
 
-@app.post("/api/events/import", status_code=201)
+@api.post("/api/events/import", status_code=201)
 async def import_events(
     file: UploadFile = File(...),
     column_mapping: str | None = Form(None),
@@ -195,13 +224,13 @@ def serialize_import(batch: ImportBatch) -> dict:
     }
 
 
-@app.get("/api/imports")
+@api.get("/api/imports")
 def imports(db: Session = Depends(get_db)) -> list[dict]:
     batches = db.scalars(select(ImportBatch).order_by(ImportBatch.imported_at.desc()).limit(50)).all()
     return [serialize_import(batch) for batch in batches]
 
 
-@app.get("/api/research/dataset")
+@api.get("/api/research/dataset")
 def dataset_profile(db: Session = Depends(get_db)) -> dict:
     event_count = db.scalar(select(func.count(NetworkEvent.id))) or 0
     imported_count = db.scalar(select(func.count(FeatureVector.id))) or 0
@@ -217,7 +246,7 @@ def dataset_profile(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@app.get("/api/alerts")
+@api.get("/api/alerts")
 def alerts(
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100_000),
@@ -235,14 +264,35 @@ def alerts(
     return [serialize_alert(a) for a in items]
 
 
-@app.get("/api/alerts/{alert_id}")
+@api.get("/api/alerts/{alert_id}")
 def alert(alert_id: int, db: Session = Depends(get_db)) -> dict:
     item = db.scalar(select(Alert).where(Alert.id == alert_id).options(
-        joinedload(Alert.event).joinedload(NetworkEvent.feature_vector), joinedload(Alert.assessment)))
+        joinedload(Alert.event).joinedload(NetworkEvent.feature_vector), joinedload(Alert.assessment),
+        joinedload(Alert.rule), joinedload(Alert.incident)))
     if not item:
         raise HTTPException(404, "Alert not found")
+    explanation = alert_explanation(db, item)
     return {**serialize_alert(item), "event": serialize_event(item.event), "mitre_mappings": [],
-            "explanation": None, "explanation_status": "Planned for Milestone 5"}
+            "explanation": explanation, "explanation_status": explanation["status"],
+            "rule": serialize_rule(item.rule) if item.rule else None,
+            "incident": {"id": item.incident.id, "title": item.incident.title, "status": item.incident.status} if item.incident else None}
+
+
+def alert_explanation(db: Session, item: Alert) -> dict:
+    """Local SHAP explanation for ML alerts; an explicit not-applicable result for rule-only alerts."""
+    if item.evidence_type != "ML prediction":
+        return unavailable("Rule-based alert: no ML model scored this event, so there is no SHAP explanation. "
+                           "Review the rule evidence instead.", status="not_applicable")
+    prediction = db.scalar(select(Prediction).where(Prediction.event_id == item.event_id)
+                           .order_by(Prediction.created_at.desc(), Prediction.id.desc()).limit(1))
+    if prediction is None:
+        return unavailable("No stored model prediction is linked to this alert.")
+    model_version = db.get(ModelVersion, prediction.model_version_id)
+    if model_version is None:
+        return unavailable("The model version that produced this alert no longer exists.")
+    features = item.event.feature_vector.features if item.event.feature_vector else None
+    result = safe_local_explanation(model_version.artifact_path, settings.model_artifact_dir, features)
+    return {**result, "model": serialize_model(model_version), "prediction_id": prediction.id}
 
 
 class AlertUpdate(BaseModel):
@@ -250,7 +300,7 @@ class AlertUpdate(BaseModel):
     assigned_analyst: str | None = Field(default=None, max_length=100)
 
 
-@app.patch("/api/alerts/{alert_id}")
+@api.patch("/api/alerts/{alert_id}")
 def update_alert(alert_id: int, update: AlertUpdate, db: Session = Depends(get_db)) -> dict:
     item = db.scalar(select(Alert).where(Alert.id == alert_id).options(joinedload(Alert.event), joinedload(Alert.assessment)))
     if not item:
@@ -273,32 +323,203 @@ def update_alert(alert_id: int, update: AlertUpdate, db: Session = Depends(get_d
     return serialize_alert(item)
 
 
-@app.get("/api/detection-rules")
-def detection_rules() -> list[dict]:
-    return [{"id": "demo-unusual-connection-v1", "name": "Demo unusual connection behavior",
-             "enabled": True, "scope": "SYNTHETIC DEMO DATA only", "evidence":
-             "Seeded events explicitly marked with repeated attempts, sequential ports, or multiple destinations.",
-             "risk_points": 25, "limitations": "This deterministic demo rule is not a production IDS signature."}]
+def serialize_rule(rule: DetectionRule, alert_count: int | None = None) -> dict:
+    data = {
+        "id": rule.id, "key": rule.key, "name": rule.name, "description": rule.description,
+        "logic": rule.logic, "scope": rule.scope, "risk_points": rule.risk_points, "enabled": rule.enabled,
+        "version": rule.version, "limitations": rule.limitations, "built_in": rule.built_in,
+        "created_at": rule.created_at, "updated_at": rule.updated_at,
+    }
+    if alert_count is not None:
+        data["alert_count"] = alert_count
+    return data
 
 
-@app.get("/api/incidents")
+def rule_alert_counts(db: Session) -> dict[int, int]:
+    rows = db.execute(select(Alert.rule_id, func.count(Alert.id)).where(Alert.rule_id.is_not(None)).group_by(Alert.rule_id)).all()
+    return {rule_id: count for rule_id, count in rows}
+
+
+@api.get("/api/detection-rules")
+def detection_rules(db: Session = Depends(get_db)) -> list[dict]:
+    counts = rule_alert_counts(db)
+    rules = db.scalars(select(DetectionRule).order_by(DetectionRule.id)).all()
+    return [serialize_rule(rule, counts.get(rule.id, 0)) for rule in rules]
+
+
+@api.get("/api/detection-rules/{rule_id}")
+def detection_rule(rule_id: int, db: Session = Depends(get_db)) -> dict:
+    rule = db.get(DetectionRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "Detection rule not found")
+    alerts = db.scalars(select(Alert).where(Alert.rule_id == rule_id).options(joinedload(Alert.event), joinedload(Alert.assessment))
+                        .order_by(Alert.created_at.desc(), Alert.id.desc()).limit(50)).all()
+    return {**serialize_rule(rule, rule_alert_counts(db).get(rule.id, 0)), "recent_alerts": [serialize_alert(a) for a in alerts]}
+
+
+class DetectionRuleUpdate(BaseModel):
+    enabled: bool | None = None
+    risk_points: int | None = Field(default=None, ge=0, le=25)
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
+    limitations: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+@api.patch("/api/detection-rules/{rule_id}")
+def update_detection_rule(rule_id: int, update: DetectionRuleUpdate, db: Session = Depends(get_db)) -> dict:
+    rule = db.get(DetectionRule, rule_id)
+    if not rule:
+        raise HTTPException(404, "Detection rule not found")
+    changed = False
+    for field in ("enabled", "risk_points", "description", "limitations"):
+        value = getattr(update, field)
+        if field in update.model_fields_set and value is not None and getattr(rule, field) != value:
+            setattr(rule, field, value.strip() if isinstance(value, str) else value)
+            changed = True
+    if changed:
+        # Existing alerts keep the evidence and risk they were created with; the version records the change.
+        rule.version += 1
+        rule.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return serialize_rule(rule, rule_alert_counts(db).get(rule.id, 0))
+
+
+INCIDENT_STATUSES = ("Open", "Investigating", "Contained", "Resolved", "Closed")
+CLOSED_INCIDENT_STATUSES = ("Resolved", "Closed")
+
+
+def serialize_incident(incident: Incident, alert_count: int) -> dict:
+    return {"id": incident.id, "title": incident.title, "severity": incident.severity.value, "status": incident.status,
+            "summary": incident.summary, "first_seen": incident.first_seen, "last_seen": incident.last_seen,
+            "synthetic": incident.synthetic, "alert_count": alert_count}
+
+
+def incident_alert_counts(db: Session) -> dict[int, int]:
+    rows = db.execute(select(Alert.incident_id, func.count(Alert.id)).where(Alert.incident_id.is_not(None)).group_by(Alert.incident_id)).all()
+    return {incident_id: count for incident_id, count in rows}
+
+
+def load_incident(db: Session, incident_id: int) -> Incident:
+    incident = db.get(Incident, incident_id)
+    if not incident:
+        raise HTTPException(404, "Incident not found")
+    return incident
+
+
+def incident_detail(db: Session, incident: Incident) -> dict:
+    alerts = db.scalars(select(Alert).where(Alert.incident_id == incident.id)
+                        .options(joinedload(Alert.event), joinedload(Alert.assessment))
+                        .order_by(Alert.created_at, Alert.id)).all()
+    return {**serialize_incident(incident, len(alerts)), "alerts": [serialize_alert(a) for a in alerts]}
+
+
+def link_alerts(db: Session, incident: Incident, alert_ids: list[int]) -> None:
+    unique_ids = list(dict.fromkeys(alert_ids))
+    alerts = db.scalars(select(Alert).where(Alert.id.in_(unique_ids))).all() if unique_ids else []
+    missing = sorted(set(unique_ids) - {a.id for a in alerts})
+    if missing:
+        raise HTTPException(404, f"Alerts not found: {', '.join(map(str, missing))}")
+    for item in alerts:
+        item.incident_id = incident.id
+    db.flush()
+    refresh_incident_window(db, incident)
+
+
+def refresh_incident_window(db: Session, incident: Incident) -> None:
+    first, last = db.execute(select(func.min(Alert.created_at), func.max(Alert.created_at))
+                             .where(Alert.incident_id == incident.id)).one()
+    if first is not None:
+        incident.first_seen, incident.last_seen = first, last
+
+
+@api.get("/api/incidents")
 def incidents(
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100_000),
+    status: str | None = Query(default=None, min_length=1, max_length=32),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    statement = (
-        select(Incident)
-        .order_by(Incident.last_seen.desc(), Incident.id.desc())
-        .offset(offset)
-        .limit(limit)
-    )
-    return [{"id": i.id, "title": i.title, "severity": i.severity.value, "status": i.status,
-             "summary": i.summary, "first_seen": i.first_seen, "last_seen": i.last_seen, "synthetic": True}
-            for i in db.scalars(statement).all()]
+    statement = select(Incident)
+    if status is not None:
+        statement = statement.where(Incident.status == status)
+    statement = statement.order_by(Incident.last_seen.desc(), Incident.id.desc()).offset(offset).limit(limit)
+    counts = incident_alert_counts(db)
+    return [serialize_incident(i, counts.get(i.id, 0)) for i in db.scalars(statement).all()]
 
 
-@app.get("/api/research/metrics")
+@api.get("/api/incidents/{incident_id}")
+def incident(incident_id: int, db: Session = Depends(get_db)) -> dict:
+    return incident_detail(db, load_incident(db, incident_id))
+
+
+class IncidentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    severity: Severity = Severity.medium
+    summary: str = Field(min_length=1, max_length=5000)
+    alert_ids: list[int] = Field(default_factory=list, max_length=100)
+
+
+class IncidentUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    severity: Severity | None = None
+    status: str | None = None
+    summary: str | None = Field(default=None, min_length=1, max_length=5000)
+
+
+class IncidentAlertLink(BaseModel):
+    alert_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+@api.post("/api/incidents", status_code=201)
+def create_incident(payload: IncidentCreate, db: Session = Depends(get_db)) -> dict:
+    now = datetime.now(timezone.utc)
+    item = Incident(title=payload.title.strip(), severity=payload.severity, status="Open",
+                    summary=payload.summary.strip(), first_seen=now, last_seen=now, synthetic=False)
+    db.add(item)
+    db.flush()
+    link_alerts(db, item, payload.alert_ids)
+    db.commit()
+    return incident_detail(db, item)
+
+
+@api.patch("/api/incidents/{incident_id}")
+def update_incident(incident_id: int, update: IncidentUpdate, db: Session = Depends(get_db)) -> dict:
+    item = load_incident(db, incident_id)
+    if update.status is not None:
+        if update.status not in INCIDENT_STATUSES:
+            raise HTTPException(422, f"status must be one of: {', '.join(INCIDENT_STATUSES)}")
+        item.status = update.status
+    if update.title is not None:
+        item.title = update.title.strip()
+    if update.summary is not None:
+        item.summary = update.summary.strip()
+    if update.severity is not None:
+        item.severity = update.severity
+    db.commit()
+    return incident_detail(db, item)
+
+
+@api.post("/api/incidents/{incident_id}/alerts")
+def add_incident_alerts(incident_id: int, payload: IncidentAlertLink, db: Session = Depends(get_db)) -> dict:
+    item = load_incident(db, incident_id)
+    link_alerts(db, item, payload.alert_ids)
+    db.commit()
+    return incident_detail(db, item)
+
+
+@api.delete("/api/incidents/{incident_id}/alerts/{alert_id}")
+def remove_incident_alert(incident_id: int, alert_id: int, db: Session = Depends(get_db)) -> dict:
+    item = load_incident(db, incident_id)
+    linked = db.scalar(select(Alert).where(Alert.id == alert_id, Alert.incident_id == incident_id))
+    if not linked:
+        raise HTTPException(404, "Alert is not linked to this incident")
+    linked.incident_id = None
+    db.flush()
+    refresh_incident_window(db, item)
+    db.commit()
+    return incident_detail(db, item)
+
+
+@api.get("/api/research/metrics")
 def research_metrics(db: Session = Depends(get_db)) -> dict:
     experiments = db.scalars(select(Experiment).order_by(Experiment.created_at.desc())).all()
     if not experiments:
@@ -325,13 +546,13 @@ def serialize_model(item: ModelVersion) -> dict:
     }
 
 
-@app.get("/api/experiments")
+@api.get("/api/experiments")
 def experiments(db: Session = Depends(get_db)) -> list[dict]:
     items = db.scalars(select(Experiment).order_by(Experiment.created_at.desc())).all()
     return [serialize_experiment(item) for item in items]
 
 
-@app.post("/api/experiments", status_code=201)
+@api.post("/api/experiments", status_code=201)
 async def create_experiment(
     file: UploadFile = File(...),
     model_name: str = Form(...),
@@ -387,13 +608,13 @@ async def create_experiment(
     return {"experiment": serialize_experiment(experiment), "model": serialize_model(model)}
 
 
-@app.get("/api/models")
+@api.get("/api/models")
 def models(db: Session = Depends(get_db)) -> list[dict]:
     items = db.scalars(select(ModelVersion).order_by(ModelVersion.created_at.desc())).all()
     return [serialize_model(item) for item in items]
 
 
-@app.get("/api/models/{model_id}")
+@api.get("/api/models/{model_id}")
 def model(model_id: int, db: Session = Depends(get_db)) -> dict:
     item = db.get(ModelVersion, model_id)
     if not item:
@@ -402,7 +623,7 @@ def model(model_id: int, db: Session = Depends(get_db)) -> dict:
     return {**serialize_model(item), "experiment": serialize_experiment(experiment)}
 
 
-@app.post("/api/models/{model_id}/predict/{event_id}", status_code=201)
+@api.post("/api/models/{model_id}/predict/{event_id}", status_code=201)
 def predict_event(model_id: int, event_id: int, db: Session = Depends(get_db)) -> dict:
     model_version = db.get(ModelVersion, model_id)
     event = db.scalar(select(NetworkEvent).where(NetworkEvent.id == event_id).options(joinedload(NetworkEvent.feature_vector)))
@@ -436,13 +657,32 @@ def predict_event(model_id: int, event_id: int, db: Session = Depends(get_db)) -
         "predicted_label": prediction.predicted_label, "probability": probability,
         "inference_time_ms": elapsed_ms, "evidence_type": "ML prediction",
         "severity": generated_alert.severity.value if generated_alert else None,
-        "alert_id": generated_alert.id if generated_alert else None, "explanation": None,
+        "alert_id": generated_alert.id if generated_alert else None,
+        "explanation": safe_local_explanation(model_version.artifact_path, settings.model_artifact_dir,
+                                              event.feature_vector.features),
     }
 
 
-@app.get("/api/predictions")
+@api.get("/api/predictions")
 def predictions(db: Session = Depends(get_db)) -> list[dict]:
     items = db.scalars(select(Prediction).order_by(Prediction.created_at.desc()).limit(100)).all()
     return [{"id": item.id, "event_id": item.event_id, "model_version_id": item.model_version_id,
              "predicted_label": item.predicted_label, "probability": item.probability,
              "inference_time_ms": item.inference_time_ms, "created_at": item.created_at} for item in items]
+
+
+@api.get("/api/models/{model_id}/explanation")
+def model_explanation(model_id: int, db: Session = Depends(get_db)) -> dict:
+    """Global SHAP feature importance over the model's stored training background sample."""
+    item = db.get(ModelVersion, model_id)
+    if not item:
+        raise HTTPException(404, "Model version not found")
+    return {**safe_global_explanation(item.artifact_path, settings.model_artifact_dir), "model": serialize_model(item)}
+
+
+@api.get("/api/auth/me")
+def me(request: Request) -> dict:
+    return {"username": request.state.user}
+
+
+app.include_router(api)

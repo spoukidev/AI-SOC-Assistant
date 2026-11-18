@@ -10,6 +10,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.models import Alert, Incident
+from conftest import auth_headers
 
 
 SECURITY_HEADERS = {
@@ -25,7 +26,7 @@ def assert_security_headers(response):
 
 
 def test_health_and_demo_dashboard():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         assert client.get("/health").status_code == 200
         response = client.get("/api/dashboard")
         assert response.status_code == 200
@@ -41,12 +42,12 @@ def test_health_and_demo_dashboard():
                 for probability in db.scalars(select(Alert.model_probability)).all()
                 if probability is not None
             ]
-        expected_average = round(sum(probabilities) / len(probabilities), 4)
+        expected_average = round(sum(probabilities) / len(probabilities), 4) if probabilities else None
         assert data["metrics"]["average_model_confidence"] == expected_average
 
 
 def test_non_api_health_endpoint_is_not_marked_as_api_data():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         response = client.get("/health")
         assert response.status_code == 200
         assert "cache-control" not in response.headers
@@ -55,7 +56,7 @@ def test_non_api_health_endpoint_is_not_marked_as_api_data():
 
 
 def test_security_headers_are_present_on_api_error_responses():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         not_found = client.get("/api/events/999999")
         invalid_query = client.get("/api/events", params={"limit": 101})
 
@@ -70,7 +71,7 @@ def test_security_headers_are_present_on_api_error_responses():
 
 
 def test_dashboard_ignores_invalid_model_probabilities():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         with SessionLocal() as db:
             alerts = list(db.scalars(select(Alert).order_by(Alert.id).limit(2)).all())
             assert len(alerts) == 2
@@ -87,7 +88,7 @@ def test_dashboard_ignores_invalid_model_probabilities():
 
         dashboard = client.get("/api/dashboard")
         assert dashboard.status_code == 200
-        expected_average = round(sum(valid_probabilities) / len(valid_probabilities), 4)
+        expected_average = round(sum(valid_probabilities) / len(valid_probabilities), 4) if valid_probabilities else None
         assert dashboard.json()["metrics"]["average_model_confidence"] == expected_average
 
         for alert_id in invalid_ids:
@@ -97,7 +98,7 @@ def test_dashboard_ignores_invalid_model_probabilities():
 
 
 def test_research_metrics_are_not_fabricated():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         data = client.get("/api/research/metrics").json()
         assert data == {"available": False, "message": "No experiment results available."}
 
@@ -107,7 +108,7 @@ def test_csv_import_persists_event_and_features():
         "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,duration,packets,bytes\n"
         "2026-08-21T12:00:00Z,192.0.2.10,198.51.100.20,52000,443,tcp,1.5,12,2400\n"
     )
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         response = client.post("/api/events/import", files={"file": ("flows.csv", csv_data, "text/csv")})
         assert response.status_code == 201
         result = response.json()
@@ -119,7 +120,7 @@ def test_csv_import_persists_event_and_features():
 
 
 def test_csv_upload_rejects_wrong_extension():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         response = client.post("/api/events/import", files={"file": ("flows.exe", b"not csv", "application/octet-stream")})
         assert response.status_code == 415
 
@@ -127,7 +128,7 @@ def test_csv_upload_rejects_wrong_extension():
 def test_experiment_training_stores_real_metrics_and_model():
     from app.ml.demo_data import generate_labeled_demo_csv
 
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         response = client.post(
             "/api/experiments",
             data={"model_name": "logistic_regression", "name": "Synthetic API smoke test", "random_seed": "23"},
@@ -143,13 +144,14 @@ def test_experiment_training_stores_real_metrics_and_model():
 
 
 def test_alert_detail_and_workflow_update_preserve_evidence():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         alerts = client.get("/api/alerts").json()
         assert alerts and alerts[0]["risk_score"] is not None
-        alert_id = alerts[0]["id"]
+        alert_id = next(a["id"] for a in alerts if a["evidence_type"] == "Synthetic deterministic rule")
         before = client.get(f"/api/alerts/{alert_id}").json()
         assert before["event"]["raw_event"]
-        assert before["explanation"] is None
+        # Seeded alerts are rule-only, so the explanation is explicitly not applicable (no fake SHAP).
+        assert before["explanation"]["status"] == "not_applicable"
         response = client.patch(f"/api/alerts/{alert_id}", json={"status": "Investigating", "assigned_analyst": "Analyst One"})
         assert response.status_code == 200
         updated = response.json()
@@ -159,13 +161,13 @@ def test_alert_detail_and_workflow_update_preserve_evidence():
 
 
 def test_alert_workflow_rejects_unknown_status():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         alert_id = client.get("/api/alerts").json()[0]["id"]
         assert client.patch(f"/api/alerts/{alert_id}", json={"status": "Deleted"}).status_code == 422
 
 
 def test_event_listing_is_bounded_and_pageable():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         first_page = client.get("/api/events", params={"limit": 1})
         second_page = client.get("/api/events", params={"limit": 1, "offset": 1})
 
@@ -181,7 +183,7 @@ def test_event_listing_is_bounded_and_pageable():
 
 
 def test_alert_listing_is_bounded_and_pageable():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         first_page = client.get("/api/alerts", params={"limit": 1})
         second_page = client.get("/api/alerts", params={"limit": 1, "offset": 1})
 
@@ -197,7 +199,7 @@ def test_alert_listing_is_bounded_and_pageable():
 
 
 def test_alert_pagination_is_stable_when_timestamps_tie():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         with SessionLocal() as db:
             tied_alerts = list(db.scalars(select(Alert).order_by(Alert.id.desc()).limit(2)).all())
             assert len(tied_alerts) == 2
@@ -217,7 +219,7 @@ def test_alert_pagination_is_stable_when_timestamps_tie():
 
 
 def test_alert_listing_supports_triage_filters():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         all_alerts = client.get("/api/alerts")
         assert all_alerts.status_code == 200
         alerts = all_alerts.json()
@@ -248,7 +250,7 @@ def test_alert_listing_supports_triage_filters():
 
 
 def test_incident_listing_is_bounded_and_pageable():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         all_incidents = client.get("/api/incidents")
         assert all_incidents.status_code == 200
         assert len(all_incidents.json()) >= 2
@@ -268,7 +270,7 @@ def test_incident_listing_is_bounded_and_pageable():
 
 
 def test_incident_pagination_is_stable_when_last_seen_ties():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         with SessionLocal() as db:
             tied_incidents = list(db.scalars(select(Incident).order_by(Incident.id.desc()).limit(2)).all())
             assert len(tied_incidents) == 2
@@ -290,7 +292,7 @@ def test_incident_pagination_is_stable_when_last_seen_ties():
 def test_experiment_rejects_unbounded_or_unknown_hyperparameters():
     from app.ml.demo_data import generate_labeled_demo_csv
 
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         for parameters in ('{"n_estimators": 1000000000}', '{"n_jobs": 64}'):
             response = client.post(
                 "/api/experiments",
@@ -301,7 +303,7 @@ def test_experiment_rejects_unbounded_or_unknown_hyperparameters():
 
 
 def test_experiment_rejects_empty_dataset():
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         response = client.post(
             "/api/experiments",
             data={"model_name": "logistic_regression"},
@@ -317,7 +319,7 @@ def test_trained_model_predicts_imported_event():
         "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,duration,packets,bytes\n"
         "2026-08-21T12:00:00Z,192.0.2.30,198.51.100.40,52000,22,tcp,0.1,2,120\n"
     )
-    with TestClient(app) as client:
+    with TestClient(app, headers=auth_headers()) as client:
         trained = client.post(
             "/api/experiments",
             data={"model_name": "logistic_regression"},
