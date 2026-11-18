@@ -54,6 +54,8 @@ class BaseDetector(ABC):
         self.random_seed = random_seed
         self.parameters = validate_parameters(self.name, parameters)
         self.pipeline = Pipeline([("preprocess", build_preprocessor()), ("classifier", self.build_estimator())])
+        # Engineered-feature sample kept with the artifact as the SHAP reference distribution.
+        self.background: pd.DataFrame | None = None
 
     @abstractmethod
     def build_estimator(self):
@@ -71,7 +73,10 @@ class BaseDetector(ABC):
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({"name": self.name, "random_seed": self.random_seed, "parameters": self.parameters, "pipeline": self.pipeline}, path)
+        joblib.dump({
+            "name": self.name, "random_seed": self.random_seed, "parameters": self.parameters,
+            "pipeline": self.pipeline, "background": self.background, "explainer_version": 1,
+        }, path)
 
     @classmethod
     def load_artifact(cls, path: str | Path, allowed_dir: str | Path | None = None) -> dict:
