@@ -4,7 +4,7 @@
 
 An evidence-first research platform for network intrusion detection, explainable machine learning, and SOC investigation workflows.
 
-> **Current status — Milestone 1:** runnable application foundation, PostgreSQL persistence, synthetic demo events, dashboard API, and SOC dashboard shell. Detection scores shown in this milestone are deterministic demo labels—not trained-model results.
+> **Current status — Milestone 4:** validated ingestion and deterministic feature engineering; reproducible Logistic Regression, Random Forest, and XGBoost experiments; plus evidence-linked alert generation, transparent multi-factor risk scoring, triage workflow, and alert investigation. Synthetic experiments are explicitly labeled and are not evidence of real-world performance.
 
 ## Research objective
 
@@ -22,7 +22,7 @@ Network data -> ingestion -> feature processing -> ML + rules
                                   optional grounded assistant
 ```
 
-## Milestone 1 features
+## Implemented features
 
 - FastAPI service with health, dashboard, event, alert, and incident endpoints
 - PostgreSQL through SQLAlchemy, with automatic local schema initialization
@@ -30,7 +30,45 @@ Network data -> ingestion -> feature processing -> ML + rules
 - React, TypeScript, Vite, Tailwind CSS, Recharts, and TanStack Query
 - Responsive, original dark SOC interface with restrained severity semantics
 - Docker Compose startup for frontend, backend, and database
+- Secure CSV uploads with 5 MB and 10,000-row limits
+- Canonical field mapping with common network-flow column aliases
+- Per-row validation for timestamps, IP addresses, ports, counts, and duration
+- Deterministic `flow-v1` feature vectors stored separately from raw evidence
+- Import provenance, acceptance/rejection counts, and traceable row errors
+- Network Events workspace with upload, import history, and feature readiness
+- Shared saved preprocessing/classifier pipelines for training and inference
+- Logistic Regression, Random Forest, and XGBoost through a common detector interface
+- Stratified train/validation/test splits with fixed random seeds
+- Accuracy, precision, recall, F1, ROC-AUC, PR-AUC, confusion counts, and error rates
+- Immutable experiment/model metadata, dataset SHA-256, timing, and joblib artifacts
+- Experiment, model-comparison, dataset, and prediction research pages
 - No fabricated experiment metrics or threat-intelligence claims
+
+## CSV format
+
+Required columns:
+
+```text
+timestamp,src_ip,dst_ip,src_port,dst_port,protocol,duration,packets,bytes
+```
+
+Optional columns include `tcp_flags`, `src_bytes`, `dst_bytes`, `src_packets`, and `dst_packets`. Timestamps use ISO 8601. A safe example is available at `ml/datasets/synthetic-demo-flows.csv`.
+
+The ingestion pipeline calculates duration, total packets/bytes, bytes per packet, packets/bytes per second, directional ratios, port categories, protocol, and TCP-flag presence. Raw IP addresses are preserved as evidence but deliberately excluded from predictive feature vectors.
+
+## Model experiments
+
+Generate the explicitly labeled synthetic demonstration dataset and train a baseline:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe ..\ml\generate_demo_dataset.py
+.\.venv\Scripts\python.exe ..\ml\train.py ..\ml\datasets\synthetic-labeled-demo.csv --model logistic_regression
+```
+
+Available `--model` values are `logistic_regression`, `random_forest`, and `xgboost`. The `.joblib` artifact contains preprocessing and the classifier; the adjacent metadata JSON records dataset hash, features, seed, split, parameters, timing, and measured metrics.
+
+Metrics from `synthetic-labeled-demo.csv` demonstrate pipeline execution only. They must not be cited as network-intrusion detection performance.
 
 ## Quick start
 
@@ -43,12 +81,23 @@ Open the UI at `http://localhost:5173` and the API documentation at `http://loca
 
 ## Local development
 
-Backend (Python 3.11+):
+Backend (Python 3.11+). Use a virtual environment so the project's pinned
+packages do not replace packages used by other Python projects:
 
-```bash
+```powershell
 cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload
+```
+
+If PowerShell blocks activation, the virtual environment can be used without
+activating it:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
 Frontend (Node 20+):
@@ -70,14 +119,15 @@ Without `DATABASE_URL`, the backend uses a local SQLite file for convenient deve
 
 ## Roadmap
 
-1. Repository foundation and dashboard shell (current)
-2. CSV/Zeek ingestion, validation, and feature processing
-3. Logistic Regression, Random Forest, and XGBoost experiment pipeline
-4. Alert engine, documented risk score, and investigation workflow
-5. SHAP global/local explanations and deterministic language templates
-6. Evidence-backed ATT&CK context and transparent incident correlation
-7. Research views, confusion matrix, error analysis, and dataset card
-8. Optional grounded assistant, analyst feedback, and model monitoring
+1. Repository foundation and dashboard shell (complete)
+2. CSV ingestion, validation, and feature processing (complete)
+3. Logistic Regression, Random Forest, and XGBoost experiment pipeline (complete)
+4. Zeek parser and dataset-specific mapping profiles
+5. Alert engine, documented risk score, and investigation workflow
+6. SHAP global/local explanations and deterministic language templates
+7. Evidence-backed ATT&CK context and transparent incident correlation
+8. Research views, confusion matrix, error analysis, and dataset card
+9. Optional grounded assistant, analyst feedback, and model monitoring
 
 See [docs/research-roadmap.md](docs/research-roadmap.md) for the full plan.
 

@@ -2,15 +2,25 @@
 
 ## Status
 
-No trained model artifact is included in the current milestone. This document defines the intended model scope, evaluation gates, security assumptions, and reporting requirements that must be satisfied before a trained detector is presented as a research result.
+Milestone 3 supports Logistic Regression, Random Forest, and XGBoost artifacts trained from user-supplied labeled flow CSV files. No pretrained production model is included. This document defines the model scope, evaluation gates, security assumptions, and reporting requirements that must be satisfied before a trained detector is presented as a research result.
 
 ## Intended purpose
 
-Future models will classify validated network-flow features for **defensive cybersecurity research** and **SOC analyst decision support**. The model is intended to help prioritize suspicious network events; it is not intended to make autonomous containment, blocking, disciplinary, or legal decisions.
+Models classify validated network-flow features for **defensive cybersecurity research** and **SOC analyst decision support**. The model is intended to help prioritize suspicious network events; it is not intended to make autonomous containment, blocking, disciplinary, or legal decisions.
 
-The planned comparison includes simple and stronger supervised baselines so that model complexity is justified by measured gains rather than assumed superiority.
+## Inputs and output
 
-Candidate baseline families include:
+Models consume the versioned `flow-v1` feature schema. Raw IP addresses are excluded. The binary output is benign (`0`) or malicious (`1`) plus the positive-class probability. Probability is not severity.
+
+## Metrics
+
+Metrics are stored only after a completed stratified experiment and include accuracy, precision, recall, F1, ROC-AUC, PR-AUC, TP, TN, FP, FN, and error rates. The repository does not claim a fixed performance value. Synthetic demonstration metrics are not real-world results.
+
+## Baseline families
+
+The comparison includes simple and stronger supervised baselines so that model complexity is justified by measured gains rather than assumed superiority.
+
+Implemented baseline families:
 
 - Logistic Regression
 - Random Forest
@@ -192,7 +202,7 @@ If performance drops under distribution shift, that result should be reported di
 
 At the current milestone:
 
-- no trained model artifact is included,
+- no pretrained model artifact is included (users train their own from labeled CSV data),
 - no benchmark metrics are claimed,
 - synthetic UI demonstrations do not establish model performance,
 - dataset-specific biases have not yet been quantified,

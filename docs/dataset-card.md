@@ -2,7 +2,7 @@
 
 ## Dataset
 
-SYNTHETIC DEMO DATA — eight hand-authored, private-address network-flow records used only to exercise Milestone 1 persistence and UI behavior.
+Two synthetic resources are provided: hand-authored flow records for ingestion/UI behavior and a deterministic balanced labeled dataset generator for exercising Milestone 3 training and evaluation.
 
 ## License and source
 
@@ -10,4 +10,4 @@ Project-authored synthetic examples under the repository license. No packet payl
 
 ## Labels and limitations
 
-Some records trigger transparent demo rules. These labels are not ground truth and must not be used to report ML performance. There is no train/test split in this milestone.
+Some records trigger transparent demo rules. The generated labeled dataset uses deliberately constructed benign/malicious patterns and is not real ground truth. Its metrics must not be used to report real-world ML performance. Experiment splits are stratified 70/15/15 with a recorded seed.

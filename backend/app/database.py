@@ -13,9 +13,10 @@ connect_args = {}
 engine_kwargs = {"pool_pre_ping": True}
 if settings.database_url.startswith("sqlite"):
     connect_args["check_same_thread"] = False
-    # :memory: databases vanish when a connection closes. StaticPool keeps one
-    # connection so lifespan's create_all() and later sessions share tables.
-    if ":memory:" in settings.database_url:
+    # In-memory SQLite databases belong to a single connection and vanish when it
+    # closes. StaticPool keeps one connection so lifespan's create_all() and later
+    # request sessions share the same schema.
+    if settings.database_url == "sqlite://" or ":memory:" in settings.database_url:
         engine_kwargs["poolclass"] = StaticPool
         # pool_pre_ping issues a checkout query that is unnecessary (and can
         # confuse) a single shared in-memory connection.

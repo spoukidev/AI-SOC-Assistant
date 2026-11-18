@@ -197,3 +197,7 @@ All research reporting should follow these rules:
 - keep experiment configuration reproducible
 
 The objective is a technically honest SOC research platform whose results can be inspected, repeated, and challenged.
+
+## 13. Implemented ingestion and features
+
+CSV imports are validated independently per row. Accepted and rejected counts, rejection reasons, source filename, column mapping, and import time are recorded. Feature engineering is deterministic and versioned as `flow-v1`. Raw IP addresses are excluded from feature vectors to reduce memorization and leakage risk; they remain in raw evidence for investigation.

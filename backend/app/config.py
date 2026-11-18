@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     backend_cors_origins: str = "http://localhost:5173"
     # Demo data must be explicitly enabled so a deployment cannot silently seed fixtures.
     seed_demo_data: bool = False
+    max_upload_bytes: int = 5 * 1024 * 1024
+    max_import_rows: int = 10_000
+    model_artifact_dir: str = "./artifacts/models"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
