@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
-from .ml.detector import BaseDetector, DETECTORS
+from .ml.detector import BaseDetector, DETECTORS, validate_parameters
 from .ml.preprocessing import MODEL_FEATURES, feature_frame
 from .ml.training import train_experiment
 from .models import Alert, AlertAssessment, Experiment, FeatureVector, ImportBatch, Incident, ModelVersion, NetworkEvent, Prediction, Severity
@@ -356,6 +356,10 @@ async def create_experiment(
     if not isinstance(parsed_parameters, dict):
         raise HTTPException(422, "parameters must be a JSON object")
     try:
+        parsed_parameters = validate_parameters(model_name, parsed_parameters)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
         result = await run_in_threadpool(
             train_experiment, content, model_name, settings.model_artifact_dir, random_seed, parsed_parameters,
         )
@@ -409,9 +413,9 @@ def predict_event(model_id: int, event_id: int, db: Session = Depends(get_db)) -
     if not event.feature_vector:
         raise HTTPException(422, "Event has no flow-v1 feature vector")
     artifact_path = Path(model_version.artifact_path).resolve()
-    if not artifact_path.is_file():
+    if not artifact_path.is_relative_to(Path(settings.model_artifact_dir).resolve()) or not artifact_path.is_file():
         raise HTTPException(503, "Model artifact is unavailable")
-    artifact = BaseDetector.load_artifact(artifact_path)
+    artifact = BaseDetector.load_artifact(artifact_path, allowed_dir=settings.model_artifact_dir)
     pipeline = artifact["pipeline"]
     frame = feature_frame(event.feature_vector.features)
     started = perf_counter()

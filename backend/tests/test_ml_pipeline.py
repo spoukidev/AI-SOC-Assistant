@@ -17,3 +17,24 @@ def test_three_classifiers_train_evaluate_and_serialize(tmp_path: Path, model_na
     assert sum(result.metrics[key] for key in ("true_positive", "true_negative", "false_positive", "false_negative")) == result.split["test"]
     artifact = BaseDetector.load_artifact(result.artifact_path)
     assert artifact["name"] == model_name
+
+
+def test_hyperparameters_are_allowlisted_and_bounded():
+    from app.ml.detector import validate_parameters
+
+    assert validate_parameters("random_forest", {"n_estimators": 50, "max_depth": 5}) == {"n_estimators": 50, "max_depth": 5}
+    with pytest.raises(ValueError):
+        validate_parameters("random_forest", {"n_estimators": 10**9})
+    with pytest.raises(ValueError):
+        validate_parameters("random_forest", {"n_jobs": 64})
+    with pytest.raises(ValueError):
+        validate_parameters("xgboost", {"max_depth": "4"})
+    with pytest.raises(ValueError):
+        validate_parameters("logistic_regression", {"max_iter": True})
+
+
+def test_artifacts_outside_allowed_dir_are_not_loaded(tmp_path: Path):
+    result = train_experiment(generate_labeled_demo_csv(30), "logistic_regression", tmp_path / "models", random_seed=3)
+    assert BaseDetector.load_artifact(result.artifact_path, allowed_dir=tmp_path / "models")["name"] == "logistic_regression"
+    with pytest.raises(ValueError):
+        BaseDetector.load_artifact(result.artifact_path, allowed_dir=tmp_path / "elsewhere")

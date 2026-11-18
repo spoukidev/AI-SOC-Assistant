@@ -13,12 +13,46 @@ from xgboost import XGBClassifier
 from .preprocessing import build_preprocessor
 
 
+# User-tunable hyperparameters per detector with inclusive bounds. Anything else
+# (unknown keys, n_jobs, callbacks, objects) is rejected so an API caller cannot
+# request unbounded training work or pass arbitrary constructor arguments.
+ParameterSpec = tuple[type, float | None, float | None]
+ALLOWED_PARAMETERS: dict[str, dict[str, ParameterSpec]] = {
+    "logistic_regression": {"C": (float, 1e-6, 1e6), "max_iter": (int, 1, 10_000)},
+    "random_forest": {
+        "n_estimators": (int, 1, 1000), "max_depth": (int, 1, 64),
+        "min_samples_split": (int, 2, 1000), "min_samples_leaf": (int, 1, 1000),
+    },
+    "xgboost": {
+        "n_estimators": (int, 1, 1000), "max_depth": (int, 1, 16),
+        "learning_rate": (float, 1e-4, 1.0), "subsample": (float, 0.1, 1.0),
+        "colsample_bytree": (float, 0.1, 1.0),
+    },
+}
+
+
+def validate_parameters(name: str, parameters: dict | None) -> dict:
+    allowed = ALLOWED_PARAMETERS.get(name, {})
+    validated: dict = {}
+    for key, value in (parameters or {}).items():
+        if key not in allowed:
+            raise ValueError(f"Unsupported parameter for {name}: {key}. Allowed: {', '.join(sorted(allowed)) or 'none'}")
+        kind, minimum, maximum = allowed[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or (kind is int and not float(value).is_integer()):
+            raise ValueError(f"{key} must be {'an integer' if kind is int else 'a number'}")
+        value = kind(value)
+        if (minimum is not None and value < minimum) or (maximum is not None and value > maximum):
+            raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        validated[key] = value
+    return validated
+
+
 class BaseDetector(ABC):
     name: str
 
     def __init__(self, random_seed: int = 42, parameters: dict | None = None):
         self.random_seed = random_seed
-        self.parameters = parameters or {}
+        self.parameters = validate_parameters(self.name, parameters)
         self.pipeline = Pipeline([("preprocess", build_preprocessor()), ("classifier", self.build_estimator())])
 
     @abstractmethod
@@ -40,8 +74,17 @@ class BaseDetector(ABC):
         joblib.dump({"name": self.name, "random_seed": self.random_seed, "parameters": self.parameters, "pipeline": self.pipeline}, path)
 
     @classmethod
-    def load_artifact(cls, path: str | Path) -> dict:
-        return joblib.load(path)
+    def load_artifact(cls, path: str | Path, allowed_dir: str | Path | None = None) -> dict:
+        """Load a joblib (pickle) artifact. Only load files this application produced.
+
+        joblib/pickle can execute code on load, so when ``allowed_dir`` is given the
+        resolved path must sit inside it; this stops a tampered database row from
+        pointing the API at an arbitrary file on disk.
+        """
+        resolved = Path(path).resolve()
+        if allowed_dir is not None and not resolved.is_relative_to(Path(allowed_dir).resolve()):
+            raise ValueError("Model artifact is outside the configured artifact directory")
+        return joblib.load(resolved)
 
 
 class LogisticRegressionDetector(BaseDetector):

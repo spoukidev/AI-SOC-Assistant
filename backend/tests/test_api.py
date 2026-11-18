@@ -285,3 +285,50 @@ def test_incident_pagination_is_stable_when_last_seen_ties():
         assert second_page.status_code == 200
         assert first_page.json()[0]["id"] == expected_ids[0]
         assert second_page.json()[0]["id"] == expected_ids[1]
+
+
+def test_experiment_rejects_unbounded_or_unknown_hyperparameters():
+    from app.ml.demo_data import generate_labeled_demo_csv
+
+    with TestClient(app) as client:
+        for parameters in ('{"n_estimators": 1000000000}', '{"n_jobs": 64}'):
+            response = client.post(
+                "/api/experiments",
+                data={"model_name": "random_forest", "parameters": parameters},
+                files={"file": ("synthetic-labeled-demo.csv", generate_labeled_demo_csv(20), "text/csv")},
+            )
+            assert response.status_code == 422
+
+
+def test_experiment_rejects_empty_dataset():
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/experiments",
+            data={"model_name": "logistic_regression"},
+            files={"file": ("empty.csv", b"", "text/csv")},
+        )
+        assert response.status_code == 422
+
+
+def test_trained_model_predicts_imported_event():
+    from app.ml.demo_data import generate_labeled_demo_csv
+
+    csv_data = (
+        "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,duration,packets,bytes\n"
+        "2026-08-21T12:00:00Z,192.0.2.30,198.51.100.40,52000,22,tcp,0.1,2,120\n"
+    )
+    with TestClient(app) as client:
+        trained = client.post(
+            "/api/experiments",
+            data={"model_name": "logistic_regression"},
+            files={"file": ("synthetic-labeled-demo.csv", generate_labeled_demo_csv(20), "text/csv")},
+        )
+        assert trained.status_code == 201
+        model_id = trained.json()["model"]["id"]
+        assert client.post("/api/events/import", files={"file": ("predict.csv", csv_data, "text/csv")}).status_code == 201
+        event_id = client.get("/api/events", params={"source": "CSV_IMPORT:predict.csv"}).json()[0]["id"]
+        response = client.post(f"/api/models/{model_id}/predict/{event_id}")
+        assert response.status_code == 201
+        result = response.json()
+        assert result["predicted_label"] in {"benign", "malicious"}
+        assert 0.0 <= result["probability"] <= 1.0

@@ -10,6 +10,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from ..config import settings
 from ..services.csv_ingestion import normalize_row
 from .features import engineer_flow_features
 
@@ -40,8 +41,10 @@ def load_labeled_csv(content: bytes) -> tuple[pd.DataFrame, pd.Series, dict]:
         raise HTTPException(422, "Dataset contains binary data")
     try:
         frame = pd.read_csv(io.BytesIO(content))
-    except (UnicodeDecodeError, pd.errors.ParserError) as exc:
-        raise HTTPException(422, "Dataset must be a valid UTF-8 CSV") from exc
+    except (UnicodeDecodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        raise HTTPException(422, "Dataset must be a valid, non-empty UTF-8 CSV") from exc
+    if len(frame) > settings.max_import_rows:
+        raise HTTPException(413, f"Dataset exceeds the {settings.max_import_rows:,} row limit")
     missing = RAW_REQUIRED - set(frame.columns)
     if missing:
         raise HTTPException(422, f"Labeled dataset is missing columns: {', '.join(sorted(missing))}")
