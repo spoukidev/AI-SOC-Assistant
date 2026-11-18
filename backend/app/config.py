@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 5 * 1024 * 1024
     max_import_rows: int = 10_000
     model_artifact_dir: str = "./artifacts/models"
+    # Authentication (Milestone 5). No working default credentials are shipped:
+    # unset secrets are generated at startup (see app/auth.py) and logged as warnings.
+    auth_secret_key: str | None = None
+    admin_username: str = "admin"
+    admin_password: str | None = None
+    admin_password_hash: str | None = None
+    access_token_ttl_minutes: int = 60
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

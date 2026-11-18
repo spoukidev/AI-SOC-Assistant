@@ -19,6 +19,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://soc_xai:change-me-for-non-local-use@postgres:5432/soc_xai}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:5173}
       SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-}
+      ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-60}
     ports:
       - "8000:8000"
     depends_on:

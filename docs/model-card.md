@@ -2,7 +2,7 @@
 
 ## Status
 
-Milestone 3 supports Logistic Regression, Random Forest, and XGBoost artifacts trained from user-supplied labeled flow CSV files. No pretrained production model is included. This document defines the model scope, evaluation gates, security assumptions, and reporting requirements that must be satisfied before a trained detector is presented as a research result.
+Milestone 3 added Logistic Regression, Random Forest, and XGBoost artifacts trained from user-supplied labeled flow CSV files. Milestone 5 adds SHAP explanations for all three model families. No pretrained production model is included. This document defines the model scope, evaluation gates, security assumptions, and reporting requirements that must be satisfied before a trained detector is presented as a research result.
 
 ## Intended purpose
 
@@ -151,9 +151,17 @@ The project should explicitly investigate whether errors cluster around specific
 
 ## Explainability
 
-For supported models, SHAP may be used to provide global and local feature-attribution evidence.
+All three model families are explained with SHAP (Milestone 5):
 
-A local explanation should preserve:
+| Model | Explainer | Output units |
+|---|---|---|
+| Logistic Regression | `shap.LinearExplainer` (interventional) | log-odds of malicious |
+| Random Forest | `shap.TreeExplainer` (interventional) | probability of malicious |
+| XGBoost | `shap.TreeExplainer` (interventional) | probability of malicious |
+
+The reference distribution is a reproducible sample of up to 100 engineered training rows, saved in the artifact at training time. It contains no raw identifiers. One-hot columns are summed back to their `flow-v1` feature. Artifacts trained before Milestone 5 have no background sample and report explanations as unavailable until retrained. Global importance is the mean absolute SHAP value over the background sample.
+
+Each local explanation returned by the API preserves:
 
 - the feature value,
 - contribution direction,
@@ -207,7 +215,7 @@ At the current milestone:
 - synthetic UI demonstrations do not establish model performance,
 - dataset-specific biases have not yet been quantified,
 - adversarial robustness has not yet been measured,
-- explanation stability has not yet been measured,
+- explanation stability has not yet been measured (SHAP values depend on the stored background sample),
 - and production deployment suitability has not been established.
 
 These limitations are deliberate documentation boundaries, not missing results to be filled with estimates.

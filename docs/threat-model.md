@@ -290,15 +290,17 @@ Representative goals:
 | Synthetic demo data clearly labeled | Implemented in Milestone 1 |
 | Deterministic demo labels separated from ML claims | Implemented in Milestone 1 |
 | PostgreSQL/SQLite persistence | Implemented in Milestone 1 |
-| CSV/schema validation | Planned |
-| Upload size/type restrictions | Planned |
-| Dataset provenance/checksums | Planned |
-| Trained model registry/versioning | Planned |
-| Leakage-aware evaluation pipeline | Planned |
-| SHAP explanation tracking | Planned |
+| CSV/schema validation | Implemented in Milestone 2 |
+| Upload size/type restrictions | Implemented in Milestone 2 (size is checked after the upload is read) |
+| Dataset provenance/checksums | Implemented in Milestone 3 (dataset SHA-256) |
+| Trained model registry/versioning | Implemented in Milestone 3 |
+| Leakage-aware evaluation pipeline | Partial: stratified split with fixed seed, IPs excluded from features |
+| Model artifact loading confined to the artifact directory | Implemented in Milestone 4 |
+| SHAP explanation tracking | Implemented in Milestone 5 (model version and background sample recorded with every explanation) |
 | Adversarial robustness evaluation | Planned |
 | Evidence-backed ATT&CK mapping | Planned |
-| Analyst authentication/authorization hardening | Planned |
+| API authentication | Implemented in Milestone 5: one admin account, PBKDF2 password hash, HS256 bearer tokens, failed-login throttling |
+| Role-based authorization / multiple analysts | Planned |
 | Grounded LLM assistant | Planned |
 | Tool-level deterministic authorization | Planned |
 

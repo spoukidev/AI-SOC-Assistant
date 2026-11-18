@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 
 from .detector import create_detector
 from .evaluation import evaluate_detector
+from .explain import background_sample
 from .preprocessing import MODEL_FEATURES, load_labeled_csv
 
 
@@ -47,6 +48,7 @@ def train_experiment(
     started = perf_counter()
     detector.train(x_train, y_train)
     training_time_ms = (perf_counter() - started) * 1000
+    detector.background = background_sample(x_train, random_seed)
     validation_metrics, _ = evaluate_detector(detector, x_validation, y_validation)
     test_metrics, inference_time_ms = evaluate_detector(detector, x_test, y_test)
     version = f"{model_name}-{uuid4().hex[:12]}"
