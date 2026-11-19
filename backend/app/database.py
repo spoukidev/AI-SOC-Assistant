@@ -40,9 +40,18 @@ _ADDED_COLUMNS = {
     "alerts": {
         "rule_id": "INTEGER REFERENCES detection_rules(id)",
         "incident_id": "INTEGER REFERENCES incidents(id)",
+        "rule_version": "INTEGER",
+        "dedup_key": "VARCHAR(64)",
+        "manual_correlation": "BOOLEAN NOT NULL DEFAULT {false}",
     },
-    "incidents": {"synthetic": "BOOLEAN NOT NULL DEFAULT {false}"},
+    "incidents": {"synthetic": "BOOLEAN NOT NULL DEFAULT {false}", "correlation_key": "VARCHAR(100)"},
+    "detection_rules": {"conditions": "JSON"},
 }
+# Indexes for added columns (CREATE ... IF NOT EXISTS works on SQLite and PostgreSQL).
+_ADDED_INDEXES = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_alerts_dedup_key ON alerts (dedup_key)",
+    "CREATE INDEX IF NOT EXISTS ix_incidents_correlation_key ON incidents (correlation_key)",
+]
 
 
 def ensure_schema(bind=None) -> list[str]:
@@ -61,4 +70,7 @@ def ensure_schema(bind=None) -> list[str]:
                     # Table/column names come from the constant above, never from user input.
                     connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl.format(false=false_literal)}"))
                     added.append(f"{table}.{name}")
+        if inspector.has_table("alerts") and inspector.has_table("incidents"):
+            for statement in _ADDED_INDEXES:
+                connection.execute(text(statement))
     return added

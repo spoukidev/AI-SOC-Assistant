@@ -24,7 +24,7 @@ from app.ml.explain import get_explainer
 from app.models import Alert, DetectionRule, Incident
 from conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, auth_headers
 
-OPEN_ROUTES = {("/health", "GET"), ("/api/auth/login", "POST")}
+OPEN_ROUTES = {("/health", "GET"), ("/api/auth/login", "POST"), ("/api/auth/logout", "POST")}
 
 
 def client() -> TestClient:
@@ -84,7 +84,7 @@ def test_invalid_expired_and_forged_tokens_are_rejected():
                         "a-different-secret-key-that-is-long-enough!!", algorithm="HS256")
     unsigned = jwt.encode({"sub": TEST_ADMIN_USERNAME, "iss": "soc-xai", "iat": now, "exp": now + timedelta(hours=1)},
                           None, algorithm="none")
-    wrong_user, _ = create_access_token("someone-else")
+    wrong_user = create_access_token("someone-else").token
     with TestClient(app) as c:
         for token in ("garbage", expired, forged, unsigned, wrong_user):
             assert c.get("/api/alerts", headers={"Authorization": f"Bearer {token}"}).status_code == 401
@@ -101,9 +101,12 @@ def test_login_issues_working_token_and_rejects_bad_password():
         good = c.post("/api/auth/login", json={"username": TEST_ADMIN_USERNAME, "password": TEST_ADMIN_PASSWORD})
         assert good.status_code == 200
         body = good.json()
-        assert body["token_type"] == "bearer" and body["expires_in"] > 0
-        me = c.get("/api/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
-        assert me.status_code == 200 and me.json() == {"username": TEST_ADMIN_USERNAME}
+        assert body["expires_in"] > 0 and "access_token" not in body  # browser logins never see the token
+        scripted = c.post("/api/auth/login", json={"username": TEST_ADMIN_USERNAME, "password": TEST_ADMIN_PASSWORD,
+                                                   "issue_bearer_token": True}).json()
+        assert scripted["token_type"] == "bearer"
+        me = c.get("/api/auth/me", headers={"Authorization": f"Bearer {scripted['access_token']}"})
+        assert me.status_code == 200 and me.json()["username"] == TEST_ADMIN_USERNAME
     login_throttle.reset()
 
 
@@ -234,7 +237,11 @@ def test_global_explanation_covers_all_flow_features(model_name):
 
 
 @pytest.mark.parametrize("model_name", ["logistic_regression", "random_forest", "xgboost"])
-def test_ml_alert_has_additive_local_explanation(model_name):
+def test_ml_alert_has_additive_local_explanation(model_name, monkeypatch):
+    from app.config import settings
+
+    # The imported flow also matches a live rule; disable the rule engine so the model raises the alert.
+    monkeypatch.setattr(settings, "rule_engine_enabled", False)
     with client() as c:
         _, prediction = train_and_predict(c, model_name, f"local-{model_name}.csv")
         assert prediction["predicted_label"] == "malicious"
@@ -279,7 +286,8 @@ def test_ensure_schema_adds_milestone5_columns_to_legacy_database(tmp_path):
         connection.execute(text("CREATE TABLE alerts (id INTEGER PRIMARY KEY, title VARCHAR(200))"))
         connection.execute(text("INSERT INTO incidents (id, title) VALUES (1, 'old')"))
     added = ensure_schema(legacy)
-    assert set(added) == {"alerts.rule_id", "alerts.incident_id", "incidents.synthetic"}
+    assert set(added) == {"alerts.rule_id", "alerts.incident_id", "incidents.synthetic", "alerts.rule_version",
+                          "alerts.dedup_key", "alerts.manual_correlation", "incidents.correlation_key"}
     columns = {column["name"] for column in inspect(legacy).get_columns("alerts")}
     assert {"rule_id", "incident_id"} <= columns
     with legacy.connect() as connection:
