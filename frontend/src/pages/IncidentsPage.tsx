@@ -17,6 +17,9 @@ export function parseAlertIds(input: string): number[] | null {
 
 const when = (value: string) => new Date(value).toLocaleString()
 
+export const incidentProvenance = (item: Incident) =>
+  item.synthetic ? 'Synthetic demo' : item.auto_correlated ? `Auto-correlated (${item.correlation_key?.replace('src:', 'source ')})` : 'Analyst'
+
 export function IncidentsPage({ onOpenAlert }: { onOpenAlert: (id: number) => void }) {
   const queryClient = useQueryClient()
   const [selected, setSelected] = useState<number | null>(null)
@@ -54,7 +57,7 @@ export function IncidentsPage({ onOpenAlert }: { onOpenAlert: (id: number) => vo
     const incident = detail.data
     return <div className="alert-investigation"><button className="back-action" onClick={() => setSelected(null)}><ArrowLeft size={15}/> Back to incidents</button>
       {detail.isLoading ? <div className="empty-state">Loading incident…</div> : detail.error || !incident ? <div className="error">Incident is unavailable.</div> : <>
-        <section className="alert-hero"><div><span>INC-{String(incident.id).padStart(4, '0')}{incident.synthetic ? ' · SYNTHETIC DEMO' : ''}</span><h2>{incident.title}</h2><p>{when(incident.first_seen)} → {when(incident.last_seen)} · {incident.alert_count} linked alerts</p></div>
+        <section className="alert-hero"><div><span>INC-{String(incident.id).padStart(4, '0')} · {incidentProvenance(incident).toUpperCase()}</span><h2>{incident.title}</h2><p>{when(incident.first_seen)} → {when(incident.last_seen)} · {incident.alert_count} linked alerts</p></div>
           <div className="alert-hero-actions"><select aria-label="Severity" value={incident.severity} onChange={e => update.mutate({ severity: e.target.value })}>{SEVERITIES.map(x => <option key={x}>{x}</option>)}</select>
             <select aria-label="Status" value={incident.status} onChange={e => update.mutate({ status: e.target.value })}>{INCIDENT_STATUSES.map(x => <option key={x}>{x}</option>)}</select></div></section>
         <section className="panel evidence-card"><div className="panel-head"><div><span>ANALYST SUMMARY</span><h2>Case notes</h2></div></div><div className="evidence-statement"><p>{incident.summary}</p></div></section>
@@ -81,9 +84,9 @@ export function IncidentsPage({ onOpenAlert }: { onOpenAlert: (id: number) => vo
     </form>}
     <section className="panel table-panel"><div className="panel-head"><div><span>CASE MANAGEMENT</span><h2>Incidents</h2></div>{!creating && <button onClick={() => setCreating(true)}><Plus size={12}/> New incident</button>}</div>
       <div className="table-wrap"><table><thead><tr><th>INCIDENT</th><th>SEVERITY</th><th>STATUS</th><th>ALERTS</th><th>WINDOW</th><th>PROVENANCE</th><th></th></tr></thead><tbody>
-        {list.data?.map(item => <tr key={item.id} className="clickable-row" onClick={() => setSelected(item.id)}><td><strong>{item.title}</strong><small>INC-{String(item.id).padStart(4, '0')}</small></td><td><span className={`badge ${item.severity.toLowerCase()}`}><i/>{item.severity}</span></td><td><span className="status">{item.status}</span></td><td>{item.alert_count}</td><td>{when(item.first_seen)} → {when(item.last_seen)}</td><td><span className={item.synthetic ? 'source synthetic' : 'source imported'}>{item.synthetic ? 'Synthetic demo' : 'Analyst'}</span></td><td className="row-arrow"><ChevronRight size={16}/></td></tr>)}
+        {list.data?.map(item => <tr key={item.id} className="clickable-row" onClick={() => setSelected(item.id)}><td><strong>{item.title}</strong><small>INC-{String(item.id).padStart(4, '0')}</small></td><td><span className={`badge ${item.severity.toLowerCase()}`}><i/>{item.severity}</span></td><td><span className="status">{item.status}</span></td><td>{item.alert_count}</td><td>{when(item.first_seen)} → {when(item.last_seen)}</td><td><span className={item.synthetic ? 'source synthetic' : 'source imported'}>{incidentProvenance(item)}</span></td><td className="row-arrow"><ChevronRight size={16}/></td></tr>)}
         {!list.data?.length && <tr><td colSpan={7} className="empty">{list.isLoading ? 'Loading incidents…' : 'No incidents yet.'}</td></tr>}
       </tbody></table></div></section>
-    <div className="research-note"><Boxes size={18}/><span>Incidents group alerts an analyst decided belong together. Correlation is manual; automatic correlation is not implemented.</span></div>
+    <div className="research-note"><Boxes size={18}/><span>New rule and ML alerts from the same source IP inside the correlation window are grouped automatically. Correlation by shared source is a triage aid, not proof of one attack. Alerts you link or unlink by hand are never moved again automatically.</span></div>
   </div>
 }

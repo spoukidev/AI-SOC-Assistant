@@ -1,33 +1,34 @@
 import { describe, expect, it, vi } from 'vitest'
-import { UnauthorizedError, apiFetch, createTokenStore, errorMessage, login, onUnauthorized } from './api'
+import { UnauthorizedError, apiFetch, createCsrfStore, errorMessage, login, logout, onUnauthorized, restoreSession } from './api'
 
-function memoryStorage() {
-  const data = new Map<string, string>()
-  return { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => { data.set(k, v) }, removeItem: (k: string) => { data.delete(k) } }
-}
+const ok = (body: unknown = {}) => vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }))
+const call = (mock: ReturnType<typeof vi.fn>, index = 0) => mock.mock.calls[index] as unknown as [string, RequestInit]
 
-describe('api client auth', () => {
-  it('sends the stored bearer token', async () => {
-    const store = createTokenStore(memoryStorage())
-    store.set('abc.def.ghi')
-    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
-    await apiFetch('/alerts', {}, { fetchImpl, store, base: 'http://api' })
-    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+describe('api client cookie sessions', () => {
+  it('always sends cookies and never an Authorization header', async () => {
+    const fetchImpl = ok()
+    await apiFetch('/alerts', {}, { fetchImpl, store: createCsrfStore(), base: 'http://api' })
+    const [url, init] = call(fetchImpl)
     expect(url).toBe('http://api/alerts')
-    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer abc.def.ghi')
-  })
-
-  it('omits the header when signed out', async () => {
-    const store = createTokenStore(memoryStorage())
-    const fetchImpl = vi.fn(async () => new Response('{}', { status: 200 }))
-    await apiFetch('/alerts', {}, { fetchImpl, store, base: '' })
-    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(init.credentials).toBe('include')
     expect(new Headers(init.headers).has('Authorization')).toBe(false)
   })
 
-  it('clears the token and notifies listeners on 401', async () => {
-    const store = createTokenStore(memoryStorage())
-    store.set('expired')
+  it('adds the CSRF token to state-changing requests only', async () => {
+    const store = createCsrfStore()
+    store.set('csrf-123')
+    const fetchImpl = ok()
+    await apiFetch('/alerts', {}, { fetchImpl, store, base: '' })
+    await apiFetch('/incidents', { method: 'POST' }, { fetchImpl, store, base: '' })
+    await apiFetch('/incidents/1/alerts/2', { method: 'delete' }, { fetchImpl, store, base: '' })
+    expect(new Headers(call(fetchImpl, 0)[1].headers).has('X-CSRF-Token')).toBe(false)
+    expect(new Headers(call(fetchImpl, 1)[1].headers).get('X-CSRF-Token')).toBe('csrf-123')
+    expect(new Headers(call(fetchImpl, 2)[1].headers).get('X-CSRF-Token')).toBe('csrf-123')
+  })
+
+  it('clears the CSRF token and notifies listeners on 401', async () => {
+    const store = createCsrfStore()
+    store.set('stale')
     const listener = vi.fn()
     const unsubscribe = onUnauthorized(listener)
     const fetchImpl = vi.fn(async () => new Response('{"detail":"Not authenticated"}', { status: 401 }))
@@ -37,13 +38,27 @@ describe('api client auth', () => {
     unsubscribe()
   })
 
-  it('stores the token after a successful login and surfaces API errors', async () => {
-    const store = createTokenStore(null)
-    const ok = vi.fn(async () => new Response(JSON.stringify({ access_token: 'tok', username: 'admin' }), { status: 200 }))
-    await expect(login('admin', 'pw', { fetchImpl: ok, store, base: '' })).resolves.toBe('admin')
-    expect(store.get()).toBe('tok')
+  it('keeps only the CSRF token after login and surfaces API errors', async () => {
+    const store = createCsrfStore()
+    const fetchImpl = ok({ csrf_token: 'csrf-abc', username: 'admin' })
+    await expect(login('admin', 'pw', { fetchImpl, store, base: '' })).resolves.toBe('admin')
+    expect(store.get()).toBe('csrf-abc')
+    expect(call(fetchImpl)[1].credentials).toBe('include')
     const bad = vi.fn(async () => new Response(JSON.stringify({ detail: 'Invalid username or password' }), { status: 401 }))
-    await expect(login('admin', 'nope', { fetchImpl: bad, store: createTokenStore(null), base: '' })).rejects.toThrow('Invalid username or password')
+    await expect(login('admin', 'nope', { fetchImpl: bad, store: createCsrfStore(), base: '' })).rejects.toThrow('Invalid username or password')
+  })
+
+  it('restores a session from the cookie and signs out', async () => {
+    const store = createCsrfStore()
+    await expect(restoreSession({ fetchImpl: ok({ username: 'admin', csrf_token: 'c1' }), store, base: '' })).resolves.toBe('admin')
+    expect(store.get()).toBe('c1')
+    const signedOut = vi.fn(async () => new Response('{}', { status: 401 }))
+    await expect(restoreSession({ fetchImpl: signedOut, store, base: '' })).resolves.toBeNull()
+    store.set('c2')
+    const logoutFetch = ok()
+    await logout({ fetchImpl: logoutFetch, store, base: '' })
+    expect(call(logoutFetch)[1].method).toBe('POST')
+    expect(store.get()).toBeNull()
   })
 
   it('reads FastAPI error shapes', async () => {

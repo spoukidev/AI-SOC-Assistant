@@ -1,21 +1,21 @@
-// API client with bearer-token auth (Milestone 5).
-// The token lives in sessionStorage: it is cleared when the tab closes and expires server-side (default 60 min).
+// API client (Milestone 5.1): cookie sessions with CSRF protection.
+// The session token lives in an HttpOnly cookie that page scripts cannot read. The only secret held
+// in JavaScript is the CSRF token, kept in memory and sent as X-CSRF-Token on state-changing requests.
 export const API: string = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
-const TOKEN_KEY = 'soc-xai.access-token'
+const LEGACY_TOKEN_KEY = 'soc-xai.access-token'
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
-type KeyValueStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
-export type TokenStore = { get(): string | null; set(token: string): void; clear(): void }
+export type CsrfStore = { get(): string | null; set(token: string): void; clear(): void }
 
-export function createTokenStore(storage: KeyValueStorage | null): TokenStore {
-  let memory: string | null = null
-  return {
-    get: () => (storage ? storage.getItem(TOKEN_KEY) : memory),
-    set: (token) => { if (storage) storage.setItem(TOKEN_KEY, token); else memory = token },
-    clear: () => { if (storage) storage.removeItem(TOKEN_KEY); else memory = null },
-  }
+export function createCsrfStore(): CsrfStore {
+  let token: string | null = null
+  return { get: () => token, set: (value) => { token = value }, clear: () => { token = null } }
 }
 
-export const tokenStore = createTokenStore(typeof window !== 'undefined' ? window.sessionStorage : null)
+export const csrfStore = createCsrfStore()
+
+// Milestone 5.0 kept a bearer token in sessionStorage; remove any leftover copy.
+if (typeof window !== 'undefined') { try { window.sessionStorage.removeItem(LEGACY_TOKEN_KEY) } catch { /* storage unavailable */ } }
 
 export class UnauthorizedError extends Error {
   constructor() { super('Your session has expired. Sign in again.'); this.name = 'UnauthorizedError' }
@@ -27,14 +27,15 @@ export function onUnauthorized(listener: () => void): () => void {
   return () => { unauthorizedListeners.delete(listener) }
 }
 
-type FetchDeps = { fetchImpl?: typeof fetch; store?: TokenStore; base?: string }
+type FetchDeps = { fetchImpl?: typeof fetch; store?: CsrfStore; base?: string }
 
 export async function apiFetch(path: string, init: RequestInit = {}, deps: FetchDeps = {}): Promise<Response> {
-  const { fetchImpl = fetch, store = tokenStore, base = API } = deps
+  const { fetchImpl = fetch, store = csrfStore, base = API } = deps
   const headers = new Headers(init.headers)
-  const token = store.get()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetchImpl(`${base}${path}`, { ...init, headers })
+  const method = (init.method || 'GET').toUpperCase()
+  const csrf = store.get()
+  if (!SAFE_METHODS.has(method) && csrf) headers.set('X-CSRF-Token', csrf)
+  const response = await fetchImpl(`${base}${path}`, { ...init, headers, credentials: 'include' })
   if (response.status === 401) {
     store.clear()
     unauthorizedListeners.forEach((listener) => listener())
@@ -66,17 +67,30 @@ export async function sendJson<T>(path: string, method: 'POST' | 'PATCH' | 'DELE
 }
 
 export async function login(username: string, password: string, deps: FetchDeps = {}): Promise<string> {
-  const { fetchImpl = fetch, store = tokenStore, base = API } = deps
+  const { fetchImpl = fetch, store = csrfStore, base = API } = deps
   const response = await fetchImpl(`${base}/auth/login`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
   })
   if (!response.ok) throw new Error(await errorMessage(response, 'Sign-in failed'))
-  const body = await response.json() as { access_token: string; username: string }
-  store.set(body.access_token)
+  const body = await response.json() as { csrf_token: string; username: string }
+  store.set(body.csrf_token)
   return body.username
 }
 
-export function logout(store: TokenStore = tokenStore): void {
-  store.clear()
-  unauthorizedListeners.forEach((listener) => listener())
+/** Restore an existing cookie session after a page load. Returns the username, or null when signed out. */
+export async function restoreSession(deps: FetchDeps = {}): Promise<string | null> {
+  const { fetchImpl = fetch, store = csrfStore, base = API } = deps
+  const response = await fetchImpl(`${base}/auth/me`, { credentials: 'include' })
+  if (!response.ok) { store.clear(); return null }
+  const body = await response.json() as { username: string; csrf_token: string }
+  store.set(body.csrf_token)
+  return body.username
+}
+
+export async function logout(deps: FetchDeps = {}): Promise<void> {
+  const { fetchImpl = fetch, store = csrfStore, base = API } = deps
+  try { await fetchImpl(`${base}/auth/logout`, { method: 'POST', credentials: 'include' }) } finally {
+    store.clear()
+    unauthorizedListeners.forEach((listener) => listener())
+  }
 }

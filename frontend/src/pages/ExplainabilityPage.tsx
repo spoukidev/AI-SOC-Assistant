@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Activity, ChevronRight, Info } from 'lucide-react'
 import { getJson } from '../lib/api'
 import { barWidths, featureLabel, outputSpaceLabel } from '../lib/explain'
-import type { AlertSummary, GlobalExplanation, ModelRef } from '../lib/types'
+import type { AlertSummary, GlobalExplanation, ModelRef, StabilityReport } from '../lib/types'
 
 const modelLabel = (name: string) => ({ logistic_regression: 'Logistic Regression', random_forest: 'Random Forest', xgboost: 'XGBoost' }[name] || name)
 
@@ -15,6 +15,22 @@ export function GlobalImportance({ explanation }: { explanation: GlobalExplanati
     <span className="shap-track"><i className="neutral" style={{ width: `${widths[index]}%` }}/></span>
     <b>{item.mean_abs_shap.toFixed(4)}</b>
   </div>)}</div>
+}
+
+export function StabilitySummary({ stability }: { stability?: StabilityReport }) {
+  if (!stability) return null
+  if (stability.status !== 'available') return <div className="stability-box unavailable"><strong>Stability not measured</strong><span>{stability.reason}</span></div>
+  const pct = (value?: number) => (typeof value === 'number' ? `${Math.round(value * 100)}%` : '—')
+  return <div className={`stability-box ${stability.verdict?.replace(' ', '-')}`}>
+    <strong>Explanation stability: {stability.verdict}</strong>
+    <span>Explainer rebuilt on {stability.resamples} random halves of the reference sample ({stability.reference_rows_per_resample} rows each).</span>
+    <div className="stability-metrics">
+      <span>Global top-{stability.top_k} overlap <b>{pct(stability.global_top_k_jaccard)}</b></span>
+      <span>Per-alert top-3 overlap <b>{pct(stability.local_top3_jaccard)}</b></span>
+      <span>Ranking correlation <b>{stability.global_rank_spearman?.toFixed(3)}</b></span>
+    </div>
+    <small>{stability.thresholds}. This measures sensitivity to the reference sample only, not to retraining or input changes.</small>
+  </div>
 }
 
 export function ExplainabilityPage({ onOpenAlert }: { onOpenAlert: (id: number) => void }) {
@@ -33,6 +49,7 @@ export function ExplainabilityPage({ onOpenAlert }: { onOpenAlert: (id: number) 
           {global.isLoading ? <div className="empty-state">Computing SHAP values…</div> : global.error ? <div className="error">{(global.error as Error).message}</div> : global.data && <>
             <GlobalImportance explanation={global.data}/>
             {global.data.status === 'available' && <small className="shap-rest">{global.data.method} · {global.data.samples} background samples · units: {outputSpaceLabel(global.data.output_space)}</small>}
+            {global.data.status === 'available' && <StabilitySummary stability={global.data.stability}/>}
           </>}
         </> : <div className="empty-state">No trained models yet. Run an experiment to get SHAP explanations.</div>}
       </article>
