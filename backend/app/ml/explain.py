@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 BACKGROUND_SIZE = 100
 TOP_FEATURES = 8
+STABILITY_TOP_K = 5
+STABILITY_RESAMPLES = 5
 EXPLANATION_NOTE = (
     "SHAP values show how each feature moved this model's output relative to its average output on the "
     "training background sample. They explain the model, not the attacker, and are not proof of malicious activity."
@@ -75,19 +77,24 @@ class _ModelExplainer:
         self.groups = [(feature, groups[feature]) for feature in MODEL_FEATURES if feature in groups]
 
         if self.model_name == "logistic_regression":
-            self.explainer = shap.LinearExplainer(self.classifier, self.background_matrix)
             self.method = "SHAP LinearExplainer (interventional)"
             self.output_space = "log_odds"
         elif self.model_name in {"random_forest", "xgboost"}:
-            self.explainer = shap.TreeExplainer(
-                self.classifier, self.background_matrix,
-                feature_perturbation="interventional", model_output="probability",
-            )
             self.method = "SHAP TreeExplainer (interventional)"
             self.output_space = "probability"
         else:
             raise ExplanationUnavailable(f"No SHAP explainer is configured for model type {self.model_name}")
+        self.explainer = self._build_explainer(self.background_matrix)
         self.global_result: dict | None = None
+        self.stability_result: dict | None = None
+
+    def _build_explainer(self, reference: np.ndarray):
+        import shap
+
+        if self.output_space == "log_odds":
+            return shap.LinearExplainer(self.classifier, reference)
+        return shap.TreeExplainer(self.classifier, reference, feature_perturbation="interventional",
+                                  model_output="probability")
 
     def _transform(self, frame: pd.DataFrame) -> np.ndarray:
         matrix = self.preprocess.transform(frame)
@@ -95,10 +102,11 @@ class _ModelExplainer:
             matrix = matrix.toarray()
         return np.asarray(matrix, dtype=float)
 
-    def _shap(self, matrix: np.ndarray) -> tuple[np.ndarray, float]:
-        values = np.asarray(self.explainer.shap_values(matrix, check_additivity=False)
-                            if self.output_space == "probability" else self.explainer.shap_values(matrix))
-        base = np.asarray(self.explainer.expected_value, dtype=float).reshape(-1)
+    def _shap(self, matrix: np.ndarray, explainer=None) -> tuple[np.ndarray, float]:
+        explainer = explainer or self.explainer
+        values = np.asarray(explainer.shap_values(matrix, check_additivity=False)
+                            if self.output_space == "probability" else explainer.shap_values(matrix))
+        base = np.asarray(explainer.expected_value, dtype=float).reshape(-1)
         if values.ndim == 3:  # (rows, features, classes): keep the positive ("malicious") class
             values = values[:, :, 1]
             base_value = float(base[1] if base.size > 1 else base[0])
@@ -151,6 +159,77 @@ class _ModelExplainer:
         return self.global_result
 
 
+    def stability(self, top_k: int = STABILITY_TOP_K, resamples: int = STABILITY_RESAMPLES,
+                  fraction: float = 0.5, seed: int = 0) -> dict:
+        """Measure how much the explanations depend on which reference rows SHAP uses.
+
+        The explainer is rebuilt on ``resamples`` random halves of the stored background sample, and
+        every background row is explained each time. Reported numbers are mean pairwise Jaccard
+        overlaps of (a) the global top-k features and (b) each row's local top-3 features, plus the
+        mean Spearman correlation of the global importance ranking. 1.0 = identical every time.
+        """
+        if self.stability_result is not None:
+            return self.stability_result
+        rows = len(self.background_matrix)
+        if rows < 10:
+            self.stability_result = {"status": "unavailable", "reason": "At least 10 background rows are needed."}
+            return self.stability_result
+        rng = np.random.default_rng(seed)
+        size = max(5, int(rows * fraction))
+        global_sets, rankings, local_sets = [], [], []
+        for _ in range(resamples):
+            reference = self.background_matrix[rng.choice(rows, size=size, replace=False)]
+            grouped, _ = self._shap(self.background_matrix, self._build_explainer(reference))
+            importance = np.abs(grouped).mean(axis=0)
+            global_sets.append(_top(importance, top_k))
+            rankings.append(_ranks(importance))
+            local_sets.append([_top(np.abs(row), 3) for row in grouped])
+        pairs = [(a, b) for a in range(resamples) for b in range(a + 1, resamples)]
+        global_overlap = float(np.mean([_jaccard(global_sets[a], global_sets[b]) for a, b in pairs]))
+        local_overlap = float(np.mean([
+            np.mean([_jaccard(local_sets[a][row], local_sets[b][row]) for row in range(rows)]) for a, b in pairs
+        ]))
+        rank_correlation = float(np.mean([_spearman(rankings[a], rankings[b]) for a, b in pairs]))
+        if global_overlap >= 0.8 and local_overlap >= 0.8:
+            verdict = "stable"
+        elif global_overlap >= 0.6 and local_overlap >= 0.6:
+            verdict = "moderately stable"
+        else:
+            verdict = "unstable"
+        self.stability_result = {
+            "status": "available", "verdict": verdict, "top_k": top_k, "resamples": resamples,
+            "reference_rows_per_resample": size, "explained_rows": rows,
+            "global_top_k_jaccard": round(global_overlap, 4), "local_top3_jaccard": round(local_overlap, 4),
+            "global_rank_spearman": round(rank_correlation, 4),
+            "method": "Rebuild the explainer on random halves of the background sample and compare feature rankings.",
+            "thresholds": "stable: both overlaps ≥ 0.8; moderately stable: both ≥ 0.6; otherwise unstable",
+        }
+        return self.stability_result
+
+
+def _top(values: np.ndarray, k: int, epsilon: float = 1e-9) -> set[int]:
+    """Indexes of the k largest values, ignoring (near-)zero ones so ties among unused features
+    cannot make rankings look more stable than they are."""
+    return {int(index) for index in np.argsort(-values, kind="stable")[:k] if values[index] > epsilon}
+
+
+def _jaccard(a: set, b: set) -> float:
+    return 1.0 if not a and not b else len(a & b) / len(a | b)
+
+
+def _ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(-values, kind="stable")
+    ranks = np.empty(len(values))
+    ranks[order] = np.arange(len(values))
+    return ranks
+
+
+def _spearman(a: np.ndarray, b: np.ndarray) -> float:
+    if np.std(a) == 0 or np.std(b) == 0:
+        return 1.0
+    return float(np.corrcoef(a, b)[0, 1])
+
+
 def _json_value(value):
     if isinstance(value, (np.generic,)):
         return value.item()
@@ -193,9 +272,17 @@ def safe_local_explanation(artifact_path: str | Path, allowed_dir: str | Path, f
         return unavailable("The explanation could not be computed for this model.", status="error")
 
 
-def safe_global_explanation(artifact_path: str | Path, allowed_dir: str | Path) -> dict:
+def safe_global_explanation(artifact_path: str | Path, allowed_dir: str | Path, include_stability: bool = True) -> dict:
     try:
-        return get_explainer(artifact_path, allowed_dir).global_importance()
+        explainer = get_explainer(artifact_path, allowed_dir)
+        result = dict(explainer.global_importance())
+        if include_stability:
+            try:
+                result["stability"] = explainer.stability()
+            except Exception:  # stability is a diagnostic; never lose the explanation over it
+                logger.exception("SHAP stability check failed for %s", artifact_path)
+                result["stability"] = {"status": "error", "reason": "The stability check could not be computed."}
+        return result
     except ExplanationUnavailable as exc:
         return {"status": "unavailable", "reason": str(exc), "importance": [], "note": EXPLANATION_NOTE}
     except Exception:

@@ -233,6 +233,13 @@ def test_global_explanation_covers_all_flow_features(model_name):
         assert len(body["importance"]) == 12
         assert body["importance"] == sorted(body["importance"], key=lambda item: item["mean_abs_shap"], reverse=True)
         assert body["output_space"] == ("log_odds" if model_name == "logistic_regression" else "probability")
+        stability = body["stability"]
+        assert stability["status"] == "available" and stability["resamples"] == 5 and stability["top_k"] == 5
+        for metric in ("global_top_k_jaccard", "local_top3_jaccard", "global_rank_spearman"):
+            assert -1.0 <= stability[metric] <= 1.0
+        assert stability["verdict"] in {"stable", "moderately stable", "unstable"}
+        # Cached and deterministic: a second call returns identical numbers.
+        assert c.get(f"/api/models/{model_id}/explanation").json()["stability"] == stability
         assert c.get("/api/models/999999/explanation").status_code == 404
 
 
@@ -293,3 +300,25 @@ def test_ensure_schema_adds_milestone5_columns_to_legacy_database(tmp_path):
     with legacy.connect() as connection:
         assert connection.execute(text("SELECT synthetic FROM incidents")).scalar() == 0
     assert ensure_schema(legacy) == []
+
+
+def test_stability_helpers_ignore_unused_features():
+    import numpy as np
+
+    from app.ml.explain import _jaccard, _spearman, _top
+
+    assert _top(np.array([0.0, 0.5, 0.0, 0.2]), 3) == {1, 3}  # zero-importance ties are not "top" features
+    assert _jaccard({1, 2}, {2, 3}) == pytest.approx(1 / 3)
+    assert _jaccard(set(), set()) == 1.0
+    assert _spearman(np.array([0, 1, 2.0]), np.array([2, 1, 0.0])) == pytest.approx(-1.0)
+
+
+def test_stability_on_synthetic_data_is_measured_not_assumed(tmp_path):
+    from app.ml.training import train_experiment
+
+    result = train_experiment(generate_labeled_demo_csv(40), "random_forest", tmp_path, random_seed=1)
+    explainer = get_explainer(result.artifact_path, tmp_path)
+    report = explainer.stability(seed=3)
+    assert report["explained_rows"] == len(explainer.background)
+    assert report["reference_rows_per_resample"] == len(explainer.background) // 2
+    assert explainer.stability(seed=3) is report
