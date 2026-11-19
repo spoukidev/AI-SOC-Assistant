@@ -115,6 +115,8 @@ def normalize_row(row: dict[str, str]) -> dict:
         timestamp = datetime.fromisoformat(timestamp_text)
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=timezone.utc)
+        # Store UTC: SQLite drops offsets, so mixed offsets would otherwise compare as wall-clock times.
+        timestamp = timestamp.astimezone(timezone.utc)
     except (KeyError, ValueError) as exc:
         raise ValueError("invalid timestamp; use ISO 8601") from exc
     try:

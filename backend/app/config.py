@@ -17,12 +17,24 @@ class Settings(BaseSettings):
     admin_password: str | None = None
     admin_password_hash: str | None = None
     access_token_ttl_minutes: int = 60
+    # Browser sessions use an HttpOnly cookie. Secure by default; set AUTH_COOKIE_SECURE=false only for
+    # plain-http local setups whose browser refuses Secure cookies.
+    auth_cookie_secure: bool = True
+    # Live rule engine and auto-correlation (see README "Detection and correlation").
+    rule_engine_enabled: bool = True
+    auto_correlation_enabled: bool = True
+    correlation_window_minutes: int = 60
+    correlation_min_alerts: int = 2
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property
     def cors_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
+        origins = [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
+        if "*" in origins:
+            # Credentialed (cookie) requests must never be allowed from any origin.
+            raise ValueError("BACKEND_CORS_ORIGINS cannot contain '*'; list the frontend origins explicitly")
+        return origins
 
 
 settings = Settings()

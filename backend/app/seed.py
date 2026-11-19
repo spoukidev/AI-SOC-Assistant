@@ -25,8 +25,56 @@ BUILT_IN_RULES = [
                  f"({', '.join(f'{port}/{name}' for port, name in SENSITIVE_SERVICE_PORTS.items())}).",
         "scope": "SYNTHETIC DEMO DATA only",
         "risk_points": 25,
-        "limitations": "This deterministic demo rule is not a production IDS signature. It is evaluated only when "
-                       "demo data is seeded; there is no live rule engine for imported events yet.",
+        "limitations": "This deterministic demo rule is not a production IDS signature. It has no machine-evaluable "
+                       "conditions, so the live rule engine never runs it; only the demo seed applies it.",
+    },
+    {
+        "key": "syn-probe-sensitive-service-v1",
+        "name": "Short SYN-only connection to a remote-access or database service",
+        "description": "A TCP flow with SYN but no ACK and very few packets toward SSH, Telnet, FTP, SMB, RDP, VNC or a "
+                       "database port. Typical of port scanning or failed connection attempts.",
+        "logic": "protocol = TCP AND tcp_flags contains SYN AND tcp_flags does not contain ACK AND dst_port in "
+                 "(21, 22, 23, 445, 1433, 3306, 3389, 5432, 5900) AND packets ≤ 6",
+        "conditions": [
+            {"field": "protocol", "op": "eq", "value": "TCP"},
+            {"field": "tcp_flags", "op": "contains", "value": "SYN"},
+            {"field": "tcp_flags", "op": "not_contains", "value": "ACK"},
+            {"field": "dst_port", "op": "in", "value": [21, 22, 23, 445, 1433, 3306, 3389, 5432, 5900]},
+            {"field": "packets", "op": "lte", "value": 6},
+        ],
+        "scope": "Imported flow events (live rule engine)",
+        "risk_points": 20,
+        "limitations": "Needs the tcp_flags column. Legitimate failed logins or health checks also match. One flow is "
+                       "weak evidence on its own; repeated activity and correlation add context.",
+    },
+    {
+        "key": "cleartext-remote-admin-v1",
+        "name": "Cleartext remote-administration session (FTP/Telnet)",
+        "description": "A TCP flow to FTP or Telnet that exchanged enough packets to look like a real session. "
+                       "Credentials on these protocols travel unencrypted.",
+        "logic": "protocol = TCP AND dst_port in (21, 23) AND packets ≥ 10",
+        "conditions": [
+            {"field": "protocol", "op": "eq", "value": "TCP"},
+            {"field": "dst_port", "op": "in", "value": [21, 23]},
+            {"field": "packets", "op": "gte", "value": 10},
+        ],
+        "scope": "Imported flow events (live rule engine)",
+        "risk_points": 10,
+        "limitations": "Port-based: services on non-standard ports are missed and other services on 21/23 are flagged.",
+    },
+    {
+        "key": "small-packet-burst-v1",
+        "name": "High-rate burst of small packets",
+        "description": "Many small packets per second, a pattern seen in floods and some scanning tools.",
+        "logic": "packets_per_second ≥ 500 AND bytes_per_packet ≤ 80 AND packets ≥ 50",
+        "conditions": [
+            {"field": "packets_per_second", "op": "gte", "value": 500},
+            {"field": "bytes_per_packet", "op": "lte", "value": 80},
+            {"field": "packets", "op": "gte", "value": 50},
+        ],
+        "scope": "Imported flow events (live rule engine)",
+        "risk_points": 15,
+        "limitations": "Thresholds are illustrative, not tuned on a real network. Busy legitimate services can exceed them.",
     },
 ]
 
@@ -36,7 +84,8 @@ def ensure_builtin_rules(db: Session) -> None:
     now = datetime.now(timezone.utc)
     for spec in BUILT_IN_RULES:
         if db.scalar(select(DetectionRule).where(DetectionRule.key == spec["key"])) is None:
-            db.add(DetectionRule(**spec, enabled=True, version=1, built_in=True, created_at=now, updated_at=now))
+            db.add(DetectionRule(**{"conditions": None, **spec}, enabled=True, version=1, built_in=True,
+                                 created_at=now, updated_at=now))
     db.commit()
 
 

@@ -12,5 +12,4 @@ TEST_ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 def auth_headers() -> dict[str, str]:
     from app.auth import create_access_token
 
-    token, _ = create_access_token(TEST_ADMIN_USERNAME)
-    return {"Authorization": f"Bearer {token}"}
+    return {"Authorization": f"Bearer {create_access_token(TEST_ADMIN_USERNAME).token}"}

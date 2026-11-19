@@ -299,7 +299,12 @@ Representative goals:
 | SHAP explanation tracking | Implemented in Milestone 5 (model version and background sample recorded with every explanation) |
 | Adversarial robustness evaluation | Planned |
 | Evidence-backed ATT&CK mapping | Planned |
-| API authentication | Implemented in Milestone 5: one admin account, PBKDF2 password hash, HS256 bearer tokens, failed-login throttling |
+| API authentication | Implemented in Milestone 5: one admin account, PBKDF2 password hash, HS256 tokens, failed-login throttling |
+| Browser session hardening | Implemented in Milestone 5: HttpOnly + SameSite=Strict + Secure (configurable) cookie, CSRF token and Origin check on cookie-authenticated writes, no token in JavaScript storage, credentialed CORS restricted to exact origins |
+| HTTP security headers | Implemented in Milestone 5: CSP, X-Content-Type-Options, X-Frame-Options/frame-ancestors, Referrer-Policy on the API and nginx; HSTS on HTTPS API responses |
+| Alert flooding from re-imports | Partial (Milestone 5): rule alerts are deduplicated per rule and flow; events themselves are still stored again |
+| Explanation stability check | Implemented in Milestone 5 for reference-sample sensitivity; perturbation and retraining sensitivity planned |
+| Session revocation / distributed rate limiting | Planned (tokens are stateless; the login throttle is per process) |
 | Role-based authorization / multiple analysts | Planned |
 | Grounded LLM assistant | Planned |
 | Tool-level deterministic authorization | Planned |

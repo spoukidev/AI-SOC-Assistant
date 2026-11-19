@@ -54,3 +54,27 @@ describe('Milestone 5 pages', () => {
     expect(parseAlertIds('0')).toBeNull()
   })
 })
+
+describe('Milestone 5.1 views', () => {
+  it('reports measured SHAP stability honestly', async () => {
+    const { StabilitySummary } = await import('../pages/ExplainabilityPage')
+    const html = renderToStaticMarkup(<StabilitySummary stability={{ status: 'available', verdict: 'moderately stable', top_k: 5, resamples: 5,
+      reference_rows_per_resample: 50, global_top_k_jaccard: 0.74, local_top3_jaccard: 0.66, global_rank_spearman: 0.91, thresholds: 'stable: both ≥ 0.8' }}/>)
+    expect(html).toContain('moderately stable')
+    expect(html).toContain('74%')
+    expect(html).toContain('not to retraining')
+    expect(renderToStaticMarkup(<StabilitySummary stability={{ status: 'unavailable', reason: 'Too few rows' }}/>)).toContain('Too few rows')
+  })
+
+  it('labels incident provenance and live rules', async () => {
+    const { incidentProvenance } = await import('../pages/IncidentsPage')
+    const base = { id: 1, title: 't', severity: 'High', status: 'Open', summary: 's', first_seen: '', last_seen: '', alert_count: 2 }
+    expect(incidentProvenance({ ...base, synthetic: false, auto_correlated: true, correlation_key: 'src:203.0.113.5' })).toBe('Auto-correlated (source 203.0.113.5)')
+    expect(incidentProvenance({ ...base, synthetic: false })).toBe('Analyst')
+    expect(incidentProvenance({ ...base, synthetic: true })).toBe('Synthetic demo')
+    const html = renderToStaticMarkup(<RuleCard onToggle={() => {}} onRiskPoints={() => {}} onShowAlerts={() => {}} rule={{
+      id: 2, key: 'syn-probe', name: 'SYN probe', description: 'd', logic: 'packets ≤ 6', scope: 'live', risk_points: 20, enabled: true,
+      version: 1, limitations: 'l', built_in: true, updated_at: '', alert_count: 0, evaluated_live: true }}/>)
+    expect(html).toContain('LIVE')
+  })
+})

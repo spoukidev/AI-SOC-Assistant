@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, Response, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session, joinedload
 from starlette.concurrency import run_in_threadpool
 
 from .config import settings
-from .auth import authenticate, create_access_token, get_auth_config, login_throttle, require_user
+from .auth import (
+    CSRF_HEADER, SESSION_COOKIE, authenticate, create_access_token, get_auth_config, login_throttle, require_user,
+)
 from .database import Base, SessionLocal, engine, ensure_schema, get_db
 from .ml.detector import BaseDetector, DETECTORS, validate_parameters
 from .ml.explain import safe_global_explanation, safe_local_explanation, unavailable
@@ -22,6 +24,8 @@ from .ml.preprocessing import MODEL_FEATURES, feature_frame
 from .ml.training import train_experiment
 from .models import Alert, AlertAssessment, DetectionRule, Experiment, FeatureVector, ImportBatch, Incident, ModelVersion, NetworkEvent, Prediction, Severity
 from .security.alert_engine import create_ml_alert
+from .security.correlation import correlate_alerts
+from .security.rule_engine import describe_condition, evaluate_events, validate_conditions
 from .security.risk_score import calculate_risk
 from .seed import ensure_builtin_rules, seed_demo_data
 from .services.csv_ingestion import read_csv_upload
@@ -39,15 +43,20 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title=settings.app_name, version="0.5.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="0.5.1", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=False,
+    # Credentials are needed for the HttpOnly session cookie. Origins are an explicit list ('*' is rejected).
+    allow_credentials=True,
     # Only advertise the methods implemented by the API (reads, imports/training, triage, incident links).
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", CSRF_HEADER],
 )
+
+
+# Swagger UI / ReDoc load scripts from a CDN, so they only get the frame-ancestors restriction.
+INTERACTIVE_DOCS_PATHS = {"/docs", "/docs/oauth2-redirect", "/redoc"}
 
 
 @app.middleware("http")
@@ -56,6 +65,14 @@ async def set_security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["X-Frame-Options"] = "DENY"
+    if request.url.path not in INTERACTIVE_DOCS_PATHS:
+        # The API serves JSON only: no scripts, styles, frames or form targets are ever needed.
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    else:
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
@@ -75,10 +92,18 @@ def health() -> dict:
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=1024)
+    # Scripts can ask for the token in the body to use as a Bearer header. The browser UI never does:
+    # it relies on the HttpOnly cookie so page scripts never see the session token.
+    issue_bearer_token: bool = False
+
+
+def set_session_cookie(response: Response, token: str, max_age: int) -> None:
+    response.set_cookie(SESSION_COOKIE, token, max_age=max_age, path="/api", httponly=True,
+                        secure=settings.auth_cookie_secure, samesite="strict")
 
 
 @app.post("/api/auth/login")
-def login(credentials: LoginRequest, request: Request) -> dict:
+def login(credentials: LoginRequest, request: Request, response: Response) -> dict:
     client = request.client.host if request.client else "unknown"
     if login_throttle.blocked(client):
         raise HTTPException(429, "Too many failed login attempts. Try again later.")
@@ -86,8 +111,18 @@ def login(credentials: LoginRequest, request: Request) -> dict:
         login_throttle.fail(client)
         raise HTTPException(401, "Invalid username or password", headers={"WWW-Authenticate": "Bearer"})
     login_throttle.reset(client)
-    token, expires_in = create_access_token(credentials.username)
-    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in, "username": credentials.username}
+    issued = create_access_token(credentials.username)
+    set_session_cookie(response, issued.token, issued.expires_in)
+    body = {"username": credentials.username, "expires_in": issued.expires_in, "csrf_token": issued.csrf_token}
+    if credentials.issue_bearer_token:
+        body.update({"access_token": issued.token, "token_type": "bearer"})
+    return body
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response) -> dict:
+    response.delete_cookie(SESSION_COOKIE, path="/api", httponly=True, secure=settings.auth_cookie_secure, samesite="strict")
+    return {"status": "signed_out"}
 
 
 def serialize_event(event: NetworkEvent) -> dict:
@@ -119,7 +154,7 @@ def serialize_alert(alert: Alert) -> dict:
             "assigned_analyst": assessment.assigned_analyst if assessment else None,
             "updated_at": assessment.updated_at if assessment else alert.created_at,
             "synthetic": alert.event.source == "SYNTHETIC DEMO DATA",
-            "rule_id": alert.rule_id, "incident_id": alert.incident_id}
+            "rule_id": alert.rule_id, "rule_version": alert.rule_version, "incident_id": alert.incident_id}
 
 
 @api.get("/api/dashboard")
@@ -200,6 +235,7 @@ async def import_events(
     )
     db.add(batch)
     db.flush()
+    imported: list[tuple[NetworkEvent, dict]] = []
     for row in parsed.events:
         features = row.pop("features")
         event = NetworkEvent(
@@ -211,8 +247,26 @@ async def import_events(
         db.add(event)
         db.flush()
         db.add(FeatureVector(event_id=event.id, import_id=batch.id, schema_version="flow-v1", features=features))
+        imported.append((event, features))
+    detection = run_detection(db, imported)
     db.commit()
-    return serialize_import(batch)
+    return {**serialize_import(batch), **detection}
+
+
+def run_detection(db: Session, items: list[tuple[NetworkEvent, dict | None]]) -> dict:
+    """Live rule engine + auto-correlation for newly stored or re-evaluated events."""
+    if not settings.rule_engine_enabled:
+        return {"alerts_created": 0, "duplicate_alerts_skipped": 0, "incidents_updated": []}
+    result = evaluate_events(db, items, settings.correlation_window_minutes)
+    touched = auto_correlate(db, result.alerts)
+    return {"alerts_created": len(result.alerts), "duplicate_alerts_skipped": result.skipped_duplicates,
+            "incidents_updated": sorted(touched)}
+
+
+def auto_correlate(db: Session, new_alerts: list[Alert]) -> set[int]:
+    if not settings.auto_correlation_enabled or not new_alerts:
+        return set()
+    return correlate_alerts(db, new_alerts, settings.correlation_window_minutes, settings.correlation_min_alerts)
 
 
 def serialize_import(batch: ImportBatch) -> dict:
@@ -328,6 +382,7 @@ def serialize_rule(rule: DetectionRule, alert_count: int | None = None) -> dict:
         "id": rule.id, "key": rule.key, "name": rule.name, "description": rule.description,
         "logic": rule.logic, "scope": rule.scope, "risk_points": rule.risk_points, "enabled": rule.enabled,
         "version": rule.version, "limitations": rule.limitations, "built_in": rule.built_in,
+        "conditions": rule.conditions, "evaluated_live": bool(rule.conditions),
         "created_at": rule.created_at, "updated_at": rule.updated_at,
     }
     if alert_count is not None:
@@ -362,6 +417,52 @@ class DetectionRuleUpdate(BaseModel):
     risk_points: int | None = Field(default=None, ge=0, le=25)
     description: str | None = Field(default=None, min_length=1, max_length=2000)
     limitations: str | None = Field(default=None, min_length=1, max_length=2000)
+    conditions: list | None = None
+
+
+class DetectionRuleCreate(BaseModel):
+    key: str = Field(min_length=3, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=2000)
+    conditions: list
+    risk_points: int = Field(default=15, ge=0, le=25)
+    limitations: str = Field(default="Analyst-defined rule; not validated against a labeled dataset.", min_length=1, max_length=2000)
+    enabled: bool = True
+
+
+def checked_conditions(conditions) -> list[dict]:
+    try:
+        return validate_conditions(conditions)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@api.post("/api/detection-rules", status_code=201)
+def create_detection_rule(payload: DetectionRuleCreate, db: Session = Depends(get_db)) -> dict:
+    conditions = checked_conditions(payload.conditions)
+    if db.scalar(select(DetectionRule.id).where(DetectionRule.key == payload.key)) is not None:
+        raise HTTPException(409, "A rule with this key already exists")
+    now = datetime.now(timezone.utc)
+    rule = DetectionRule(key=payload.key, name=payload.name.strip(), description=payload.description.strip(),
+                         logic=" AND ".join(describe_condition(c) for c in conditions), scope="Imported flow events (live rule engine)",
+                         risk_points=payload.risk_points, enabled=payload.enabled, version=1,
+                         limitations=payload.limitations.strip(), conditions=conditions, built_in=False,
+                         created_at=now, updated_at=now)
+    db.add(rule)
+    db.commit()
+    return serialize_rule(rule, 0)
+
+
+@api.post("/api/detection-rules/evaluate")
+def evaluate_stored_events(limit: int = Query(default=10_000, ge=1, le=10_000), db: Session = Depends(get_db)) -> dict:
+    """Run enabled rules over the most recent stored events that have no alert yet (idempotent)."""
+    events = db.scalars(select(NetworkEvent).options(joinedload(NetworkEvent.feature_vector))
+                        .where(~select(Alert.id).where(Alert.event_id == NetworkEvent.id).exists())
+                        .order_by(NetworkEvent.timestamp.desc(), NetworkEvent.id.desc()).limit(limit)).all()
+    items = [(event, event.feature_vector.features if event.feature_vector else None) for event in events]
+    detection = run_detection(db, items)
+    db.commit()
+    return {"events_evaluated": len(items), **detection}
 
 
 @api.patch("/api/detection-rules/{rule_id}")
@@ -370,6 +471,14 @@ def update_detection_rule(rule_id: int, update: DetectionRuleUpdate, db: Session
     if not rule:
         raise HTTPException(404, "Detection rule not found")
     changed = False
+    if "conditions" in update.model_fields_set and update.conditions is not None:
+        if rule.conditions is None:
+            raise HTTPException(422, "This rule is catalog-only; its conditions cannot be edited")
+        conditions = checked_conditions(update.conditions)
+        if conditions != rule.conditions:
+            rule.conditions = conditions
+            rule.logic = " AND ".join(describe_condition(c) for c in conditions)
+            changed = True
     for field in ("enabled", "risk_points", "description", "limitations"):
         value = getattr(update, field)
         if field in update.model_fields_set and value is not None and getattr(rule, field) != value:
@@ -390,7 +499,8 @@ CLOSED_INCIDENT_STATUSES = ("Resolved", "Closed")
 def serialize_incident(incident: Incident, alert_count: int) -> dict:
     return {"id": incident.id, "title": incident.title, "severity": incident.severity.value, "status": incident.status,
             "summary": incident.summary, "first_seen": incident.first_seen, "last_seen": incident.last_seen,
-            "synthetic": incident.synthetic, "alert_count": alert_count}
+            "synthetic": incident.synthetic, "alert_count": alert_count,
+            "correlation_key": incident.correlation_key, "auto_correlated": incident.correlation_key is not None}
 
 
 def incident_alert_counts(db: Session) -> dict[int, int]:
@@ -420,6 +530,7 @@ def link_alerts(db: Session, incident: Incident, alert_ids: list[int]) -> None:
         raise HTTPException(404, f"Alerts not found: {', '.join(map(str, missing))}")
     for item in alerts:
         item.incident_id = incident.id
+        item.manual_correlation = True  # analyst decision: auto-correlation will not move this alert again
     db.flush()
     refresh_incident_window(db, incident)
 
@@ -513,6 +624,7 @@ def remove_incident_alert(incident_id: int, alert_id: int, db: Session = Depends
     if not linked:
         raise HTTPException(404, "Alert is not linked to this incident")
     linked.incident_id = None
+    linked.manual_correlation = True
     db.flush()
     refresh_incident_window(db, item)
     db.commit()
@@ -651,6 +763,9 @@ def predict_event(model_id: int, event_id: int, db: Session = Depends(get_db)) -
     db.add(prediction)
     db.flush()
     generated_alert = create_ml_alert(db, event, prediction, model_version.model_name, model_version.version)
+    if generated_alert is not None and generated_alert.incident_id is None:
+        db.flush()
+        auto_correlate(db, [generated_alert])
     db.commit()
     return {
         "id": prediction.id, "event_id": event.id, "model": serialize_model(model_version),
@@ -682,7 +797,9 @@ def model_explanation(model_id: int, db: Session = Depends(get_db)) -> dict:
 
 @api.get("/api/auth/me")
 def me(request: Request) -> dict:
-    return {"username": request.state.user}
+    claims = request.state.claims
+    return {"username": request.state.user, "csrf_token": claims.get("csrf"),
+            "expires_at": datetime.fromtimestamp(claims["exp"], timezone.utc)}
 
 
 app.include_router(api)

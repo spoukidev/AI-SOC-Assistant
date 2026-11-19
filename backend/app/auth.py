@@ -6,6 +6,11 @@
 * Access tokens are short-lived HS256 JWTs signed with ``AUTH_SECRET_KEY``. If it is unset a random
   key is generated per process, so tokens stop working after a restart.
 * Password and username checks use constant-time comparison, and repeated failures are throttled.
+* Browsers authenticate with an HttpOnly, SameSite=Strict session cookie (Secure unless
+  AUTH_COOKIE_SECURE=false). Every token carries a random ``csrf`` claim; cookie-authenticated
+  POST/PATCH/PUT/DELETE requests must echo it in ``X-CSRF-Token`` (the UI reads it from
+  ``GET /api/auth/me``, which cross-origin pages cannot read because of CORS). Requests sent with an
+  ``Authorization: Bearer`` header (scripts) are not exposed to CSRF and skip that check.
 """
 from __future__ import annotations
 
@@ -152,11 +157,26 @@ def authenticate(username: str, password: str) -> bool:
     return password_ok and username_ok
 
 
-def create_access_token(subject: str, config: AuthConfig | None = None) -> tuple[str, int]:
+SESSION_COOKIE = "soc_xai_session"
+CSRF_HEADER = "X-CSRF-Token"
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@dataclass
+class IssuedToken:
+    token: str
+    expires_in: int
+    csrf_token: str
+
+
+def create_access_token(subject: str, config: AuthConfig | None = None) -> IssuedToken:
     config = config or get_auth_config()
     now = datetime.now(timezone.utc)
-    claims = {"sub": subject, "iss": TOKEN_ISSUER, "iat": now, "nbf": now, "exp": now + config.ttl, "jti": secrets.token_hex(8)}
-    return jwt.encode(claims, config.secret_key, algorithm=TOKEN_ALGORITHM), int(config.ttl.total_seconds())
+    csrf = secrets.token_urlsafe(32)
+    claims = {"sub": subject, "iss": TOKEN_ISSUER, "iat": now, "nbf": now, "exp": now + config.ttl,
+              "jti": secrets.token_hex(8), "csrf": csrf}
+    token = jwt.encode(claims, config.secret_key, algorithm=TOKEN_ALGORITHM)
+    return IssuedToken(token, int(config.ttl.total_seconds()), csrf)
 
 
 def decode_access_token(token: str) -> dict:
@@ -173,16 +193,37 @@ _UNAUTHORIZED = HTTPException(
 )
 
 
+def _origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    same_origin = f"{request.url.scheme}://{request.url.netloc}"
+    return origin == same_origin or origin in settings.cors_origins
+
+
 def require_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str:
-    if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
+    from_cookie = False
+    if credentials is not None and credentials.scheme.lower() == "bearer" and credentials.credentials:
+        token = credentials.credentials
+    elif request.cookies.get(SESSION_COOKIE):
+        token, from_cookie = request.cookies[SESSION_COOKIE], True
+    else:
         raise _UNAUTHORIZED
     try:
-        claims = decode_access_token(credentials.credentials)
+        claims = decode_access_token(token)
     except jwt.PyJWTError:
         raise _UNAUTHORIZED from None
     if not hmac.compare_digest(str(claims["sub"]).encode("utf-8"), get_auth_config().username.encode("utf-8")):
         raise _UNAUTHORIZED
+    if from_cookie and request.method.upper() not in SAFE_METHODS:
+        supplied = request.headers.get(CSRF_HEADER, "")
+        expected = str(claims.get("csrf") or "")
+        if not expected or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "CSRF token missing or invalid")
+        if not _origin_allowed(request):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-origin request rejected")
     request.state.user = claims["sub"]
+    request.state.claims = claims
     return claims["sub"]
 
 

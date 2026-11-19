@@ -24,7 +24,7 @@ from app.ml.explain import get_explainer
 from app.models import Alert, DetectionRule, Incident
 from conftest import TEST_ADMIN_PASSWORD, TEST_ADMIN_USERNAME, auth_headers
 
-OPEN_ROUTES = {("/health", "GET"), ("/api/auth/login", "POST")}
+OPEN_ROUTES = {("/health", "GET"), ("/api/auth/login", "POST"), ("/api/auth/logout", "POST")}
 
 
 def client() -> TestClient:
@@ -84,7 +84,7 @@ def test_invalid_expired_and_forged_tokens_are_rejected():
                         "a-different-secret-key-that-is-long-enough!!", algorithm="HS256")
     unsigned = jwt.encode({"sub": TEST_ADMIN_USERNAME, "iss": "soc-xai", "iat": now, "exp": now + timedelta(hours=1)},
                           None, algorithm="none")
-    wrong_user, _ = create_access_token("someone-else")
+    wrong_user = create_access_token("someone-else").token
     with TestClient(app) as c:
         for token in ("garbage", expired, forged, unsigned, wrong_user):
             assert c.get("/api/alerts", headers={"Authorization": f"Bearer {token}"}).status_code == 401
@@ -101,9 +101,12 @@ def test_login_issues_working_token_and_rejects_bad_password():
         good = c.post("/api/auth/login", json={"username": TEST_ADMIN_USERNAME, "password": TEST_ADMIN_PASSWORD})
         assert good.status_code == 200
         body = good.json()
-        assert body["token_type"] == "bearer" and body["expires_in"] > 0
-        me = c.get("/api/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
-        assert me.status_code == 200 and me.json() == {"username": TEST_ADMIN_USERNAME}
+        assert body["expires_in"] > 0 and "access_token" not in body  # browser logins never see the token
+        scripted = c.post("/api/auth/login", json={"username": TEST_ADMIN_USERNAME, "password": TEST_ADMIN_PASSWORD,
+                                                   "issue_bearer_token": True}).json()
+        assert scripted["token_type"] == "bearer"
+        me = c.get("/api/auth/me", headers={"Authorization": f"Bearer {scripted['access_token']}"})
+        assert me.status_code == 200 and me.json()["username"] == TEST_ADMIN_USERNAME
     login_throttle.reset()
 
 
@@ -230,11 +233,22 @@ def test_global_explanation_covers_all_flow_features(model_name):
         assert len(body["importance"]) == 12
         assert body["importance"] == sorted(body["importance"], key=lambda item: item["mean_abs_shap"], reverse=True)
         assert body["output_space"] == ("log_odds" if model_name == "logistic_regression" else "probability")
+        stability = body["stability"]
+        assert stability["status"] == "available" and stability["resamples"] == 5 and stability["top_k"] == 5
+        for metric in ("global_top_k_jaccard", "local_top3_jaccard", "global_rank_spearman"):
+            assert -1.0 <= stability[metric] <= 1.0
+        assert stability["verdict"] in {"stable", "moderately stable", "unstable"}
+        # Cached and deterministic: a second call returns identical numbers.
+        assert c.get(f"/api/models/{model_id}/explanation").json()["stability"] == stability
         assert c.get("/api/models/999999/explanation").status_code == 404
 
 
 @pytest.mark.parametrize("model_name", ["logistic_regression", "random_forest", "xgboost"])
-def test_ml_alert_has_additive_local_explanation(model_name):
+def test_ml_alert_has_additive_local_explanation(model_name, monkeypatch):
+    from app.config import settings
+
+    # The imported flow also matches a live rule; disable the rule engine so the model raises the alert.
+    monkeypatch.setattr(settings, "rule_engine_enabled", False)
     with client() as c:
         _, prediction = train_and_predict(c, model_name, f"local-{model_name}.csv")
         assert prediction["predicted_label"] == "malicious"
@@ -279,9 +293,32 @@ def test_ensure_schema_adds_milestone5_columns_to_legacy_database(tmp_path):
         connection.execute(text("CREATE TABLE alerts (id INTEGER PRIMARY KEY, title VARCHAR(200))"))
         connection.execute(text("INSERT INTO incidents (id, title) VALUES (1, 'old')"))
     added = ensure_schema(legacy)
-    assert set(added) == {"alerts.rule_id", "alerts.incident_id", "incidents.synthetic"}
+    assert set(added) == {"alerts.rule_id", "alerts.incident_id", "incidents.synthetic", "alerts.rule_version",
+                          "alerts.dedup_key", "alerts.manual_correlation", "incidents.correlation_key"}
     columns = {column["name"] for column in inspect(legacy).get_columns("alerts")}
     assert {"rule_id", "incident_id"} <= columns
     with legacy.connect() as connection:
         assert connection.execute(text("SELECT synthetic FROM incidents")).scalar() == 0
     assert ensure_schema(legacy) == []
+
+
+def test_stability_helpers_ignore_unused_features():
+    import numpy as np
+
+    from app.ml.explain import _jaccard, _spearman, _top
+
+    assert _top(np.array([0.0, 0.5, 0.0, 0.2]), 3) == {1, 3}  # zero-importance ties are not "top" features
+    assert _jaccard({1, 2}, {2, 3}) == pytest.approx(1 / 3)
+    assert _jaccard(set(), set()) == 1.0
+    assert _spearman(np.array([0, 1, 2.0]), np.array([2, 1, 0.0])) == pytest.approx(-1.0)
+
+
+def test_stability_on_synthetic_data_is_measured_not_assumed(tmp_path):
+    from app.ml.training import train_experiment
+
+    result = train_experiment(generate_labeled_demo_csv(40), "random_forest", tmp_path, random_seed=1)
+    explainer = get_explainer(result.artifact_path, tmp_path)
+    report = explainer.stability(seed=3)
+    assert report["explained_rows"] == len(explainer.background)
+    assert report["reference_rows_per_resample"] == len(explainer.background) // 2
+    assert explainer.stability(seed=3) is report

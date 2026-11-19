@@ -375,3 +375,17 @@ footer b { color: #748399; }
   .inline-form input { width: 130px; }
 }
 .header-actions .live { white-space: nowrap; }
+
+/* Milestone 5.1: rule engine, correlation and SHAP stability */
+.rule-runner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.rule-runner div { display: grid; gap: 4px; font-size: 11px; color: #8492a6; }
+.rule-runner strong { color: #dbeafe; font-size: 13px; }
+.rule-runner .primary-action { width: auto; margin: 0; padding: 0 16px; white-space: nowrap; }
+.stability-box { display: grid; gap: 6px; margin-top: 14px; padding: 12px 13px; border: 1px solid #1f4d3d; border-radius: 8px; background: #0b1a17; font-size: 11px; color: #8fb5a7; }
+.stability-box strong { color: #6ee7b7; text-transform: capitalize; }
+.stability-box.moderately-stable { border-color: #5a4a1d; background: #1a170b; color: #b8a77a; } .stability-box.moderately-stable strong { color: #fcd34d; }
+.stability-box.unstable, .stability-box.unavailable { border-color: #5a252d; background: #1d0f12; color: #c59ca3; } .stability-box.unstable strong, .stability-box.unavailable strong { color: #fca5a5; }
+.stability-metrics { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.stability-metrics b { color: #e2e8f0; }
+.stability-box small { color: #64748b; font-size: 10px; }
+@media (max-width: 760px) { .rule-runner { flex-direction: column; align-items: stretch; } }

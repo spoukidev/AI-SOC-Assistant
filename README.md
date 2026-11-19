@@ -43,9 +43,13 @@ Network data -> ingestion -> feature processing -> ML + rules
 - Immutable experiment/model metadata, dataset SHA-256, timing, and joblib artifacts
 - Experiment, model-comparison, dataset, and prediction research pages
 - SHAP explanations computed from the trained model: per-alert local explanations (top features with signed contributions) and global mean |SHAP| importance per model version
+- SHAP stability check: the global explanation reports how much the top features change when the explainer is rebuilt on different halves of the reference sample
 - Detection rules stored in the database with explicit logic, bounded risk points, versioned edits, and links to the alerts they raised
+- Live rule engine: enabled rules with machine-readable conditions run on every CSV import. Each alert records the rule and rule version that raised it, and re-importing the same flows never creates duplicate alerts
 - Incidents that group alerts, with status workflow, severity, time window, and link/unlink endpoints
-- Bearer-token (JWT) authentication on every data endpoint; only `/health` and the login endpoint are open
+- Automatic correlation of new alerts into incidents by source IP within a configurable time window, with first/last seen and severity kept up to date. Manual link/unlink still works and always wins
+- Authentication on every data endpoint (only `/health`, login and logout are open): HttpOnly, SameSite=Strict session cookie with CSRF protection for the UI, and bearer tokens for scripts
+- Security headers on every API response (CSP, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`) and on the nginx-served UI
 - No fabricated experiment metrics, model scores, or threat-intelligence claims
 
 ## CSV format
@@ -87,9 +91,67 @@ Training stores a reproducible sample of up to 100 engineered training rows (no 
 
 SHAP values explain the model's output relative to its training baseline. They are not proof of malicious activity and not a causal statement about the network flow.
 
+### Stability check
+
+`GET /api/models/{id}/explanation` also returns a `stability` block. The explainer is rebuilt on 5 random halves of the stored reference sample (seeded, so the result is reproducible), and the report gives:
+
+- `global_top_k_jaccard`: mean overlap of the global top-5 features between resamples and the full sample.
+- `local_top3_jaccard`: mean overlap of each explained row's top-3 features.
+- `global_rank_spearman`: rank correlation of the full global importance ranking.
+- `verdict`: `stable` when both overlaps are at least 0.8, `moderately stable` when both are at least 0.6, otherwise `unstable`.
+
+To measure it across seeds, label noise and models:
+
+```bash
+cd backend
+python ../ml/shap_stability.py --seeds 5 --label-noise 0.1
+```
+
+This measures sensitivity to the reference sample only. It does not measure how explanations change when the model is retrained or when an input is slightly changed. See the [model card](docs/model-card.md) for the measured numbers and their caveats.
+
+## Live rule engine
+
+Enabled rules that have `conditions` run on every CSV import. Each event raises at most one alert: the matching rule with the highest risk points wins, and other matching rules are listed in the alert evidence. The alert stores `rule_id` and `rule_version`, uses the event timestamp, and gets the same documented risk score as before (rule points, plus 10 asset points for remote-access or database ports, plus repeated-activity points).
+
+Each alert has a dedup key (SHA-256 of rule key, UTC timestamp and flow fields) with a unique index, so importing the same CSV twice or running the rules again creates no duplicate alerts. The import response reports `alerts_created`, `duplicate_alerts_skipped` and `incidents_updated`.
+
+Built-in live rules (thresholds are illustrative, not tuned on a real network):
+
+| Key | Logic | Points |
+|---|---|---|
+| `syn-probe-sensitive-service-v1` | TCP, SYN without ACK, sensitive port, ≤ 6 packets | 20 |
+| `small-packet-burst-v1` | ≥ 500 packets/s, ≤ 80 bytes/packet, ≥ 50 packets | 15 |
+| `cleartext-remote-admin-v1` | TCP to port 21 or 23, ≥ 10 packets | 10 |
+
+The seeded demo rule has no conditions and stays catalog-only. Custom rules:
+
+```bash
+curl -X POST http://localhost:8000/api/detection-rules -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
+  "key": "rdp-from-outside-v1", "name": "Inbound RDP", "description": "Any flow to RDP", "risk_points": 12,
+  "conditions": [{"field": "dst_port", "op": "eq", "value": 3389}, {"field": "protocol", "op": "eq", "value": "TCP"}]}'
+```
+
+Conditions are ANDed, at most 10 per rule. Fields: `protocol`, `src_port`, `dst_port`, `duration`, `packets`, `bytes`, `tcp_flags`, and the `flow-v1` features (`bytes_per_packet`, `packets_per_second`, `bytes_per_second`, `src_dst_byte_ratio`, `src_dst_packet_ratio`, `src_port_category`, `dst_port_category`, `has_tcp_flags`). Operators: `eq`, `ne`, `in`, `not_in`, `contains`, `not_contains` (for `tcp_flags` these compare whole flag tokens), `gt`, `gte`, `lt`, `lte`. Changing conditions with `PATCH /api/detection-rules/{id}` bumps the version; existing alerts keep their original version and evidence. `POST /api/detection-rules/evaluate` runs the enabled rules over stored events that have no alert yet (the UI has a "Run on stored events" button).
+
+## Incident correlation
+
+New rule and ML alerts are grouped by source IP. When at least `CORRELATION_MIN_ALERTS` alerts from the same source fall within `CORRELATION_WINDOW_MINUTES` of each other, they are attached to an open incident with key `src:<ip>`, or a new incident "Correlated activity from <ip>" is created. The incident's first/last seen are refreshed, and its severity is raised to the highest alert severity (never lowered automatically).
+
+- Alerts you link or unlink by hand are marked as manually correlated and are never moved again automatically.
+- Resolved and closed incidents are not reopened; a new incident is created instead.
+- A shared source IP is a triage hint, not proof that the alerts belong to one attack. NAT, proxies and shared hosts will group unrelated activity.
+
 ## Authentication
 
-Every `/api/*` endpoint except `POST /api/auth/login` requires `Authorization: Bearer <token>`. `/health` stays open for container health checks. The UI shows a sign-in screen and keeps the token in `sessionStorage`.
+Every `/api/*` endpoint except `POST /api/auth/login` and `POST /api/auth/logout` requires a session. `/health` stays open for container health checks.
+
+- **Browser (UI):** login sets the `soc_xai_session` cookie: `HttpOnly`, `SameSite=Strict`, `Path=/api`, and `Secure` unless `AUTH_COOKIE_SECURE=false`. JavaScript never sees the token. The token carries a random CSRF value, which the UI reads from `GET /api/auth/me` and keeps in memory only. Every cookie-authenticated `POST`, `PATCH`, `PUT` or `DELETE` must send it in `X-CSRF-Token`, and must come from an allowed origin when an `Origin` header is present; otherwise the API returns 403.
+- **Scripts:** send `{"username": ..., "password": ..., "issue_bearer_token": true}` to the login endpoint and use `Authorization: Bearer <token>`. Bearer requests do not need a CSRF token, because browsers never attach that header on their own.
+- `POST /api/auth/logout` clears the cookie.
+
+Every API response sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` (the `/docs` and `/redoc` pages only get `frame-ancestors 'none'` so Swagger UI can load). HTTPS requests also get `Strict-Transport-Security`. The nginx config that serves the UI adds matching headers.
+
+`BACKEND_CORS_ORIGINS` must list exact origins; `*` is rejected at startup because credentials are allowed. The UI and API must be on the same site (for example `localhost:5173` and `localhost:8000`, or the same domain) for the `SameSite=Strict` cookie to be sent.
 
 There is one admin account, configured with environment variables:
 
@@ -100,6 +162,16 @@ There is one admin account, configured with environment variables:
 | `ADMIN_PASSWORD` | No | Plain-text alternative for local development. It is hashed in memory at startup. Prefer `ADMIN_PASSWORD_HASH`. |
 | `ADMIN_USERNAME` | No | Defaults to `admin`. |
 | `ACCESS_TOKEN_TTL_MINUTES` | No | Token lifetime. Defaults to 60, capped at 1440. |
+| `AUTH_COOKIE_SECURE` | No | Defaults to `true`. Set `false` only when the UI is served over plain HTTP on a host other than `localhost` (browsers already accept Secure cookies on `http://localhost`). |
+
+Detection and correlation settings:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RULE_ENGINE_ENABLED` | `true` | Run enabled live rules on CSV import and allow `POST /api/detection-rules/evaluate`. |
+| `AUTO_CORRELATION_ENABLED` | `true` | Group new alerts into incidents by source IP. |
+| `CORRELATION_WINDOW_MINUTES` | `60` | Maximum gap between alerts from one source that are grouped together (1 to 10080). |
+| `CORRELATION_MIN_ALERTS` | `2` | Alerts needed before a new incident is created (1 to 100). |
 
 No working default password is shipped. If neither `ADMIN_PASSWORD_HASH` nor `ADMIN_PASSWORD` is set, the backend generates a random one-time password and prints it once as a startup warning in the backend log. Five failed logins from one client within five minutes return HTTP 429.
 
@@ -167,12 +239,22 @@ cd frontend && npm test && npm run build
 2. CSV ingestion, validation, and feature processing (complete)
 3. Logistic Regression, Random Forest, and XGBoost experiment pipeline (complete)
 4. Alert engine, documented risk score, and investigation workflow (complete)
-5. SHAP global/local explanations, stored detection rules, analyst-managed incidents, and API authentication (complete)
-6. Evidence-backed ATT&CK context and automatic, transparent incident correlation (planned)
+5. SHAP global/local explanations with a stability check, a live versioned rule engine, incidents with automatic source-IP correlation, and cookie/CSRF-protected authentication (complete)
+6. Evidence-backed ATT&CK context and richer correlation (destination, technique, time pattern) (planned)
 7. Research views: confusion matrix and error analysis linked to explanations (planned)
 8. Optional grounded assistant, analyst feedback, and model monitoring (planned)
 
-Not yet implemented and not scheduled: a Zeek `conn.log` parser with dataset-specific mapping profiles, and a live rule engine that evaluates detection rules against imported events. Today the demo rule runs only when demo data is seeded.
+Not yet implemented and not scheduled: a Zeek `conn.log` parser with dataset-specific mapping profiles.
+
+Known limitations of Milestone 5:
+
+- One admin account and no roles.
+- Sessions are stateless JWTs. Logout clears the cookie, but a stolen token stays valid until it expires; there is no server-side revocation.
+- The login rate limit is kept in memory per process; it resets on restart and is not shared between workers.
+- Rule thresholds are illustrative and have not been tuned on real traffic.
+- Correlation uses the source IP only.
+- Re-importing a CSV stores the events again; only alerts are deduplicated.
+- Schema changes are additive columns applied at startup; there are no Alembic migrations yet.
 
 See [docs/research-roadmap.md](docs/research-roadmap.md) for the full plan.
 

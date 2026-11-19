@@ -75,6 +75,11 @@ class Alert(Base):
     # Milestone 5 links. Nullable so pre-Milestone 5 rows stay valid (see database.ensure_schema).
     rule_id: Mapped[int | None] = mapped_column(ForeignKey("detection_rules.id"), nullable=True, index=True)
     incident_id: Mapped[int | None] = mapped_column(ForeignKey("incidents.id"), nullable=True, index=True)
+    # Rule version at detection time, and a fingerprint (rule + flow) that keeps re-imports from duplicating alerts.
+    rule_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dedup_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    # Set when an analyst links/unlinks the alert by hand; auto-correlation then leaves it alone.
+    manual_correlation: Mapped[bool] = mapped_column(Boolean, default=False)
     event: Mapped[NetworkEvent] = relationship(back_populates="alert")
     assessment: Mapped["AlertAssessment | None"] = relationship(back_populates="alert", uselist=False)
     rule: Mapped["DetectionRule | None"] = relationship(back_populates="alerts")
@@ -106,6 +111,8 @@ class Incident(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+    # "src:<ip>" for incidents created by auto-correlation; None for analyst-created incidents.
+    correlation_key: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     alerts: Mapped[list[Alert]] = relationship(back_populates="incident", order_by="Alert.created_at")
 
 
@@ -122,6 +129,8 @@ class DetectionRule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     limitations: Mapped[str] = mapped_column(Text)
+    # Machine-evaluable conditions (see app/security/rule_engine.py). None = catalog-only rule.
+    conditions: Mapped[list | None] = mapped_column(JSON, nullable=True)
     built_in: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
