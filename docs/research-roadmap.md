@@ -13,6 +13,7 @@
 ## Milestone 5 notes
 
 - Explanations use the training background sample stored in each artifact (up to 100 rows of engineered features). Logistic regression explanations are in log-odds; tree-model explanations are in probability.
-- Explanation stability (for example, sensitivity to the background sample or to small feature perturbations) has not been measured yet. That belongs with the adversarial-robustness work in milestone 7.
-- Incident correlation is manual. Automatic correlation belongs to milestone 6.
-- Not yet scheduled: a Zeek `conn.log` parser and a live rule engine for imported events.
+- Explanation stability is measured for sensitivity to the background sample (see the model card). Sensitivity to small feature perturbations and to retraining is still open and belongs with the adversarial-robustness work in milestone 7.
+- New alerts are correlated into incidents by source IP within a configurable window. Richer correlation (destination, technique, time pattern) belongs to milestone 6.
+- Enabled rules with machine-readable conditions run on every import. Rule thresholds are illustrative and need tuning on a real dataset.
+- Not yet scheduled: a Zeek `conn.log` parser.

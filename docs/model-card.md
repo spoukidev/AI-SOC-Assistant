@@ -173,6 +173,31 @@ An LLM or other text generator may summarize verified explanation data for reada
 
 Explanation quality must be evaluated separately from prediction quality. A correct prediction can still have an unstable or misleading explanation.
 
+### Explanation stability (measured)
+
+`GET /api/models/{id}/explanation` returns a `stability` block, and `ml/shap_stability.py` repeats the check across training seeds. The explainer is rebuilt on 5 random halves of the reference sample. We report the overlap (Jaccard) of the global top-5 features and of each explained row's top-3 features with the full-sample explanation, plus the Spearman rank correlation of the global ranking. Verdict: `stable` when both overlaps are ≥ 0.8, `moderately stable` when both are ≥ 0.6, otherwise `unstable`.
+
+Results on the synthetic labeled demo dataset, 5 training seeds per model (`python ../ml/shap_stability.py --seeds 5 --label-noise <p>`):
+
+| Label noise | Model | Global top-5 Jaccard (mean / min) | Local top-3 Jaccard (mean) | Rank Spearman (mean) | Verdict |
+|---|---|---|---|---|---|
+| 0% | Logistic Regression | 1.000 / 1.000 | 0.928 | — | stable |
+| 0% | Random Forest | 1.000 / 1.000 | 0.988 | — | stable |
+| 0% | XGBoost | 1.000 / 1.000 | 1.000 | — | stable |
+| 10% | Logistic Regression | 0.933 / 0.800 | 0.926 | 0.993 | stable |
+| 10% | Random Forest | 1.000 / 1.000 | 0.886 | 0.993 | stable |
+| 10% | XGBoost | 0.947 / 0.867 | 0.938 | 0.996 | stable |
+| 25% | Logistic Regression | 0.960 / 0.800 | 0.906 | 0.994 | stable |
+| 25% | Random Forest | 0.947 / 0.867 | 0.893 | 0.990 | stable |
+| 25% | XGBoost | 0.933 / 0.800 | 0.886 | 0.994 | stable |
+
+How to read these numbers:
+
+- They are an optimistic upper bound. The synthetic data is almost perfectly separable, and without label noise XGBoost relies almost entirely on `duration`, which makes the ranking trivially stable. Label noise was added to make the check less trivial; it is still not real traffic.
+- They measure sensitivity to the reference sample only. They say nothing about how explanations change when the model is retrained on new data or when an input is slightly perturbed. Those checks belong to the adversarial-robustness work in Milestone 7.
+- Features with near-zero attribution are ignored when picking the top features, so ties between unused features do not inflate the overlap.
+- Re-run the check on any real dataset before relying on the explanations, and treat a `moderately stable` or `unstable` verdict as a reason to look at the raw evidence rather than the top features.
+
 ## Robustness and security considerations
 
 The detector should be evaluated under an explicit defensive threat model before any robustness claim is made.
